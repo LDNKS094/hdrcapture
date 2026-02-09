@@ -1,0 +1,64 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# PyO3 / Maturin
+*.pyd
+*.dll
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled shaders
+*.cso
+shaders/*.cso
+
+# Test outputs
+*.png
+*.bmp
+*.jpg
+test_output/
+screenshots/
+
+# Logs
+*.log
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+
+# Added by cargo
+
+/target
