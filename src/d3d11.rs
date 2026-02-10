@@ -36,9 +36,7 @@ pub fn create_d3d11_device() -> anyhow::Result<D3D11Context> {
             None,
             Some(&mut context),
         )
-        .context("D3D11CreateDevice 失败")?;
-
-        (device.unwrap(), context.unwrap())
+        .context("Failed to create D3D11 device")?(device.unwrap(), context.unwrap())
     };
 
     let dxgi_device: IDXGIDevice = device.cast().unwrap();
@@ -50,8 +48,6 @@ pub fn create_d3d11_device() -> anyhow::Result<D3D11Context> {
             .unwrap()
     };
 
-    let _ = print_device_info(&dxgi_device);
-
     Ok(D3D11Context {
         device,
         context,
@@ -60,36 +56,27 @@ pub fn create_d3d11_device() -> anyhow::Result<D3D11Context> {
     })
 }
 
-fn print_device_info(dxgi_device: &IDXGIDevice) -> anyhow::Result<()> {
-    unsafe {
-        let adapter = dxgi_device.GetAdapter()?;
-        let desc = adapter.GetDesc()?;
-        let name = String::from_utf16_lossy(&desc.Description);
-
-        println!("✅ D3D11 设备创建成功");
-        println!("   GPU: {}", name.trim_end_matches('\0'));
-        println!("   显存: {} MB", desc.DedicatedVideoMemory / 1024 / 1024);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_device_creation() {
-        // 如果创建失败会 panic，成功就说明设备有效
-        let _ctx = create_d3d11_device().expect("设备创建失败");
+    fn print_device_info(dxgi_device: &IDXGIDevice) -> anyhow::Result<()> {
+        unsafe {
+            let adapter = dxgi_device.GetAdapter()?;
+            let desc = adapter.GetDesc()?;
+            let name = String::from_utf16_lossy(&desc.Description);
+
+            println!("✅ D3D11 Device Created");
+            println!("   GPU: {}", name.trim_end_matches('\0'));
+            println!("   VRAM: {} MB", desc.DedicatedVideoMemory / 1024 / 1024);
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_device_info() {
-        let ctx = create_d3d11_device().unwrap();
-
-        // 验证可以获取设备信息
-        let result = print_device_info(&ctx.dxgi_device);
-        assert!(result.is_ok());
+    fn test_device_creation() {
+        let ctx = create_d3d11_device().expect("Failed to create device");
+        print_device_info(&ctx.dxgi_device).unwrap();
     }
 
     #[test]
@@ -97,11 +84,11 @@ mod tests {
         let ctx = create_d3d11_device().unwrap();
 
         unsafe {
-            // 验证可以获取适配器
+            // Verify adapter access
             let adapter = ctx.dxgi_device.GetAdapter();
             assert!(adapter.is_ok());
 
-            // 验证可以获取适配器描述
+            // Verify adapter description
             let desc = adapter.unwrap().GetDesc();
             assert!(desc.is_ok());
         }

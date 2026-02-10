@@ -27,30 +27,26 @@ pub struct WGCCapture {
 impl WGCCapture {
     /// 启动捕获
     pub fn start(&self) -> Result<()> {
-        self.session.StartCapture().context("StartCapture 失败")?;
+        self.session.StartCapture()?;
         Ok(())
     }
 
     /// 捕获一帧并返回 ID3D11Texture2D
     pub fn capture_frame(&self) -> Result<ID3D11Texture2D> {
         // 从 FramePool 获取帧
-        let frame = self
-            .frame_pool
-            .TryGetNextFrame()
-            .context("TryGetNextFrame 失败")?;
+        let frame = self.frame_pool.TryGetNextFrame()?;
 
         // 从 Frame 获取 IDirect3DSurface
-        let surface: IDirect3DSurface = frame.Surface().context("获取 Frame Surface 失败")?;
+        let surface: IDirect3DSurface = frame.Surface()?;
 
         // 通过 COM 互操作获取底层 ID3D11Texture2D
-        let access: IDirect3DDxgiInterfaceAccess = surface
-            .cast()
-            .context("Surface 转换 IDirect3DDxgiInterfaceAccess 失败")?;
+        let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
 
+        // SAFETY: IDirect3DDxgiInterfaceAccess::GetInterface 是 unsafe 的 Win32 API 调用
         let texture: ID3D11Texture2D = unsafe {
             access
                 .GetInterface()
-                .context("GetInterface(ID3D11Texture2D) 失败")?
+                .context("Failed to get ID3D11Texture2D interface")?
         };
 
         Ok(texture)
@@ -61,14 +57,15 @@ impl WGCCapture {
 pub fn create_capture_item_for_monitor(hmonitor: HMONITOR) -> Result<GraphicsCaptureItem> {
     unsafe {
         // 获取 IGraphicsCaptureItemInterop 接口
+        // SAFETY: 工厂函数调用，失败可能意味着系统不支持或 COM 未初始化
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-                .context("获取 IGraphicsCaptureItemInterop 失败")?;
+                .context("Failed to get IGraphicsCaptureItemInterop factory")?;
 
         // 调用 CreateForMonitor
         let item = interop
             .CreateForMonitor(hmonitor)
-            .context("CreateForMonitor 失败")?;
+            .context("Failed to create CaptureItem for monitor")?;
 
         Ok(item)
     }
@@ -79,11 +76,11 @@ pub fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem>
     unsafe {
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-                .context("获取 IGraphicsCaptureItemInterop 失败")?;
+                .context("Failed to get IGraphicsCaptureItemInterop factory")?;
 
         let item = interop
             .CreateForWindow(hwnd)
-            .context("CreateForWindow 失败")?;
+            .context("Failed to create CaptureItem for window")?;
         Ok(item)
     }
 }
@@ -98,16 +95,11 @@ pub fn init_capture(d3d_ctx: &D3D11Context, item: GraphicsCaptureItem) -> Result
         DirectXPixelFormat::R16G16B16A16Float, // 16-bit HDR 格式
         2,                                     // 缓冲区数量
         size,
-    )
-    .context("CreateFreeThreaded 失败")?;
+    )?;
 
-    let session = frame_pool
-        .CreateCaptureSession(&item)
-        .context("CreateCaptureSession 失败")?;
+    let session = frame_pool.CreateCaptureSession(&item)?;
 
-    session
-        .SetIsBorderRequired(false)
-        .context("SetIsBorderRequired 失败")?;
+    session.SetIsBorderRequired(false)?;
 
     Ok(WGCCapture {
         item,
@@ -122,6 +114,10 @@ pub fn enable_dpi_awareness() {
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     unsafe {
+        // SAFETY: 这是一个 best-effort 调用。
+        // 如果进程已经设置了 DPI 感知模式（例如被 GUI 框架设置过），
+        // 此调用会返回 FALSE (E_ACCESSDENIED)。我们显式忽略此错误，
+        // 因为我们的目标只是确保它被开启，而不是必须由我们开启。
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }
