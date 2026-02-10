@@ -3,6 +3,7 @@
 
 #![cfg(windows)] //如果目标操作系统不是 Windows，就完全忽略
 #![allow(dead_code)] // 开发阶段允许未使用的代码
+#![allow(unused_imports)] // 开发阶段允许未使用的导入（测试中会用到）
 
 // 模块声明（crate 内部可见）
 pub(crate) mod capture;

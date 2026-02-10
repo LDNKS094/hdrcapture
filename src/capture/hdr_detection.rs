@@ -2,13 +2,14 @@
 //
 // 使用 QueryDisplayConfig + DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO
 // 一次性获取所有活跃显示路径的 HDR 状态，并通过 GDI 设备名匹配到 HMONITOR。
-// 结果缓存 5 秒，避免每帧都遍历。
+//
+// ## 设计原则
+// - 无全局缓存，每次查询都获取最新状态
+// - 设备状态变化时，Python 端重新创建 capture 对象即可
+// - 性能：每次查询 2-3ms（创建频率低，可接受）
 
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
 use windows::core::BOOL;
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
@@ -23,24 +24,6 @@ use windows::Win32::Graphics::Gdi::{
 };
 
 use super::types::MonitorInfo;
-
-// ---------------------------------------------------------------------------
-// 缓存
-// ---------------------------------------------------------------------------
-
-/// 缓存条目
-struct CacheEntry {
-    is_hdr: bool,
-    timestamp: Instant,
-}
-
-/// 缓存过期时间（秒）
-const CACHE_TTL_SECS: u64 = 5;
-
-/// 全局 HDR 状态缓存
-/// 键：HMONITOR 的 isize 表示，值：CacheEntry
-static HDR_CACHE: Lazy<Mutex<HashMap<isize, CacheEntry>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 // ---------------------------------------------------------------------------
 // Win32 辅助
@@ -274,9 +257,7 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
         }
     }
 
-    // --- Step 5: 合并结果，更新缓存 ---
-    let now = Instant::now();
-    let mut cache = HDR_CACHE.lock().unwrap();
+    // --- Step 5: 合并结果 ---
     let mut result = Vec::with_capacity(gdi_monitors.len());
 
     for mon in &gdi_monitors {
@@ -284,15 +265,6 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
             .get(&mon.device_name)
             .copied()
             .unwrap_or(false);
-
-        let monitor_ptr = mon.handle.0 as isize;
-        cache.insert(
-            monitor_ptr,
-            CacheEntry {
-                is_hdr,
-                timestamp: now,
-            },
-        );
 
         result.push(MonitorInfo::new(
             mon.handle,
@@ -307,10 +279,10 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
     Ok(result)
 }
 
-/// 检测显示器是否处于 HDR 模式（带缓存）
+/// 检测显示器是否处于 HDR 模式
 ///
-/// 首次调用或缓存过期时会通过 `enumerate_monitors()` 刷新全部显示器状态。
-/// 缓存有效期内直接返回缓存结果（O(1)）。
+/// 每次调用都会查询最新的显示器状态，无缓存。
+/// 性能：2-3ms（创建 capture 对象时调用，频率低）
 ///
 /// # Arguments
 /// * `monitor` - 显示器句柄 (HMONITOR)
@@ -318,35 +290,24 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
 /// # Returns
 /// * `Ok(true)` - 显示器处于 HDR 模式
 /// * `Ok(false)` - 显示器处于 SDR 模式
-pub fn is_monitor_hdr(monitor: HMONITOR) -> Result<bool> {
-    let monitor_ptr = monitor.0 as isize;
-
-    // 1. 查缓存（未过期则直接返回）
-    {
-        let cache = HDR_CACHE.lock().unwrap();
-        if let Some(entry) = cache.get(&monitor_ptr) {
-            if entry.timestamp.elapsed().as_secs() < CACHE_TTL_SECS {
-                return Ok(entry.is_hdr);
-            }
-        }
-    }
-
-    // 2. 缓存未命中或已过期 → 重新枚举
-    enumerate_monitors().context("Failed to enumerate monitors for HDR detection")?;
-
-    // 3. 再次查缓存
-    let cache = HDR_CACHE.lock().unwrap();
-    cache
-        .get(&monitor_ptr)
-        .map(|entry| entry.is_hdr)
-        .ok_or_else(|| anyhow::anyhow!("Monitor 0x{:X} not found after enumeration", monitor_ptr))
-}
-
-/// 清除 HDR 缓存
 ///
-/// 用于用户动态切换 HDR 模式后强制刷新
-pub fn clear_hdr_cache() {
-    HDR_CACHE.lock().unwrap().clear();
+/// # Design
+/// 设备状态变化时，Python 端应重新创建 capture 对象，
+/// 无需手动刷新缓存（因为没有缓存）。
+pub fn is_monitor_hdr(monitor: HMONITOR) -> Result<bool> {
+    let monitors =
+        enumerate_monitors().context("Failed to enumerate monitors for HDR detection")?;
+
+    monitors
+        .iter()
+        .find(|m| m.handle() == monitor)
+        .map(|m| m.is_hdr)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Monitor 0x{:X} not found in enumeration",
+                monitor.0 as isize
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -377,30 +338,18 @@ mod tests {
     }
 
     #[test]
-    fn test_is_monitor_hdr_uses_cache() {
-        // 先枚举一次填充缓存
+    fn test_is_monitor_hdr_consistency() {
+        // 枚举所有显示器
         let monitors = enumerate_monitors().expect("enumerate_monitors should succeed");
         assert!(!monitors.is_empty());
 
-        // 用第一个显示器测试缓存命中
-        let first = &monitors[0];
-        let result = is_monitor_hdr(first.handle()).expect("is_monitor_hdr should succeed");
-        assert_eq!(
-            result, first.is_hdr,
-            "Cache should return consistent result"
-        );
-    }
-
-    #[test]
-    fn test_clear_cache() {
-        // 填充缓存
-        let _ = enumerate_monitors();
-
-        // 清除
-        clear_hdr_cache();
-
-        // 验证缓存为空
-        let cache = HDR_CACHE.lock().unwrap();
-        assert!(cache.is_empty(), "Cache should be empty after clear");
+        // 验证 is_monitor_hdr() 返回一致的结果
+        for mon in &monitors {
+            let result = is_monitor_hdr(mon.handle()).expect("is_monitor_hdr should succeed");
+            assert_eq!(
+                result, mon.is_hdr,
+                "is_monitor_hdr() should return consistent result with enumerate_monitors()"
+            );
+        }
     }
 }
