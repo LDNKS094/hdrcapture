@@ -96,6 +96,16 @@ pub fn init_capture(d3d_ctx: &D3D11Context, item: GraphicsCaptureItem) -> Result
     })
 }
 
+/// 启用 DPI 感知（仅用于测试或需要强制开启的场景）
+pub fn enable_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +128,9 @@ mod tests {
 
     /// 枚举所有显示器
     fn enumerate_monitors() -> Vec<MonitorInfo> {
+        // 确保在枚举前启用 DPI 感知
+        enable_dpi_awareness();
+
         unsafe {
             let mut monitors = Vec::new();
 
@@ -211,61 +224,50 @@ mod tests {
     }
 
     #[test]
-    fn test_init_capture() {
-        let d3d_ctx = create_d3d11_device().unwrap();
-        let item = setup_test_capture_item();
-
-        let size = item.Size().unwrap();
-        assert!(size.Width > 0);
-        assert!(size.Height > 0);
-
-        println!("✅ CaptureItem 创建成功: {}x{}", size.Width, size.Height);
-
-        let capture = init_capture(&d3d_ctx, item).unwrap();
-
-        // 验证会话已创建
-        assert!(capture.session.IsCursorCaptureEnabled().is_ok());
-
-        println!("✅ WGC 捕获会话测试通过");
-    }
-
-    #[test]
-    fn test_capture_frame() {
+    fn test_wgc_capture_pipeline() {
         use std::thread;
         use std::time::Duration;
         use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
         use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
 
+        // 1. 准备环境
         let d3d_ctx = create_d3d11_device().unwrap();
         let item = setup_test_capture_item();
 
+        // 2. 初始化捕获会话
         let capture = init_capture(&d3d_ctx, item).unwrap();
+        println!("✅ WGC 会话初始化成功");
 
-        // 启动捕获
+        // 3. 启动捕获
         capture.start().unwrap();
+        println!("✅ 捕获已启动，等待帧...");
 
-        // 等待一帧准备好
+        // 4. 等待一帧准备好 (100ms 足够大多数情况)
         thread::sleep(Duration::from_millis(100));
 
-        // 捕获一帧
+        // 5. 捕获一帧
         let texture = capture.capture_frame().unwrap();
+        println!("✅ 成功获取帧");
 
-        // 验证纹理格式
+        // 6. 验证纹理格式 (关键步骤)
         unsafe {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut desc);
 
             println!("📊 纹理信息:");
-            println!("   格式: {:?}", desc.Format);
+            println!("   格式: {:?} (预期: R16G16B16A16_FLOAT)", desc.Format);
             println!("   尺寸: {}x{}", desc.Width, desc.Height);
             println!("   MipLevels: {}", desc.MipLevels);
 
-            // 验证格式是 R16G16B16A16_FLOAT
-            assert_eq!(desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            assert_eq!(
+                desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                "纹理格式必须是 FP16"
+            );
             assert!(desc.Width > 0);
             assert!(desc.Height > 0);
+            assert_eq!(desc.MipLevels, 1, "截图纹理不应有 Mipmaps");
         }
 
-        println!("✅ 帧捕获测试通过");
+        println!("🎉 WGC 捕获管线测试通过！");
     }
 }
