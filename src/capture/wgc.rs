@@ -1,5 +1,6 @@
 // Windows Graphics Capture 实现
 
+// 1. External Crates
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Graphics::Capture::{
@@ -13,6 +14,7 @@ use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
+// 2. Local Modules
 use crate::d3d11::D3D11Context;
 
 /// WGC 捕获会话
@@ -25,21 +27,31 @@ pub struct WGCCapture {
 impl WGCCapture {
     /// 启动捕获
     pub fn start(&self) -> Result<()> {
-        self.session.StartCapture()?;
+        self.session.StartCapture().context("StartCapture 失败")?;
         Ok(())
     }
 
     /// 捕获一帧并返回 ID3D11Texture2D
     pub fn capture_frame(&self) -> Result<ID3D11Texture2D> {
         // 从 FramePool 获取帧
-        let frame = self.frame_pool.TryGetNextFrame()?;
+        let frame = self
+            .frame_pool
+            .TryGetNextFrame()
+            .context("TryGetNextFrame 失败")?;
 
         // 从 Frame 获取 IDirect3DSurface
-        let surface: IDirect3DSurface = frame.Surface()?;
+        let surface: IDirect3DSurface = frame.Surface().context("获取 Frame Surface 失败")?;
 
         // 通过 COM 互操作获取底层 ID3D11Texture2D
-        let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
-        let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
+        let access: IDirect3DDxgiInterfaceAccess = surface
+            .cast()
+            .context("Surface 转换 IDirect3DDxgiInterfaceAccess 失败")?;
+
+        let texture: ID3D11Texture2D = unsafe {
+            access
+                .GetInterface()
+                .context("GetInterface(ID3D11Texture2D) 失败")?
+        };
 
         Ok(texture)
     }
@@ -50,10 +62,13 @@ pub fn create_capture_item_for_monitor(hmonitor: HMONITOR) -> Result<GraphicsCap
     unsafe {
         // 获取 IGraphicsCaptureItemInterop 接口
         let interop: IGraphicsCaptureItemInterop =
-            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .context("获取 IGraphicsCaptureItemInterop 失败")?;
 
         // 调用 CreateForMonitor
-        let item = interop.CreateForMonitor(hmonitor)?;
+        let item = interop
+            .CreateForMonitor(hmonitor)
+            .context("CreateForMonitor 失败")?;
 
         Ok(item)
     }
@@ -63,8 +78,12 @@ pub fn create_capture_item_for_monitor(hmonitor: HMONITOR) -> Result<GraphicsCap
 pub fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
     unsafe {
         let interop: IGraphicsCaptureItemInterop =
-            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item = interop.CreateForWindow(hwnd)?;
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .context("获取 IGraphicsCaptureItemInterop 失败")?;
+
+        let item = interop
+            .CreateForWindow(hwnd)
+            .context("CreateForWindow 失败")?;
         Ok(item)
     }
 }
@@ -72,8 +91,6 @@ pub fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem>
 /// 初始化 WGC 捕获会话
 pub fn init_capture(d3d_ctx: &D3D11Context, item: GraphicsCaptureItem) -> Result<WGCCapture> {
     let size = item.Size()?;
-
-    println!("📐 捕获目标尺寸: {}x{}", size.Width, size.Height);
 
     // 创建 FramePool（关键：使用 R16G16B16A16Float 格式捕获 HDR 数据）
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -84,10 +101,13 @@ pub fn init_capture(d3d_ctx: &D3D11Context, item: GraphicsCaptureItem) -> Result
     )
     .context("CreateFreeThreaded 失败")?;
 
-    let session = frame_pool.CreateCaptureSession(&item)?;
-    session.SetIsBorderRequired(false)?;
+    let session = frame_pool
+        .CreateCaptureSession(&item)
+        .context("CreateCaptureSession 失败")?;
 
-    println!("✅ WGC 捕获会话初始化成功");
+    session
+        .SetIsBorderRequired(false)
+        .context("SetIsBorderRequired 失败")?;
 
     Ok(WGCCapture {
         item,
@@ -115,6 +135,63 @@ mod tests {
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFO, MONITORINFOEXW,
     };
+
+    #[test]
+    fn test_wgc_capture_pipeline() {
+        use std::thread;
+        use std::time::Duration;
+        use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        // 1. 准备环境
+        let d3d_ctx = create_d3d11_device().unwrap();
+        let item = setup_test_capture_item();
+
+        // 2. 初始化捕获会话
+        let capture = init_capture(&d3d_ctx, item).unwrap();
+        println!("✅ WGC 会话初始化成功");
+
+        // 3. 启动捕获
+        capture.start().unwrap();
+        println!("✅ 捕获已启动，等待帧...");
+
+        // 4. 等待一帧准备好 (100ms 足够大多数情况)
+        thread::sleep(Duration::from_millis(100));
+
+        // 5. 捕获一帧
+        let texture = capture.capture_frame().unwrap();
+        println!("✅ 成功获取帧");
+
+        // 6. 验证纹理格式 (关键步骤)
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut desc);
+
+            println!("📊 纹理信息:");
+            println!("   格式: {:?} (预期: R16G16B16A16_FLOAT)", desc.Format);
+            println!("   尺寸: {}x{}", desc.Width, desc.Height);
+            println!("   MipLevels: {}", desc.MipLevels);
+
+            assert_eq!(
+                desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                "纹理格式必须是 FP16"
+            );
+            assert!(desc.Width > 0);
+            assert!(desc.Height > 0);
+            assert_eq!(desc.MipLevels, 1, "截图纹理不应有 Mipmaps");
+        }
+
+        println!("🎉 WGC 捕获管线测试通过！");
+    }
+
+    // --- 测试辅助函数 ---
+
+    /// 测试辅助函数：创建测试用的 CaptureItem
+    fn setup_test_capture_item() -> GraphicsCaptureItem {
+        print_all_monitors();
+        let monitor = get_primary_monitor().expect("无法获取显示器句柄");
+        create_capture_item_for_monitor(monitor).unwrap()
+    }
 
     /// 显示器信息
     #[derive(Debug)]
@@ -214,60 +291,5 @@ mod tests {
             );
         }
         println!();
-    }
-
-    /// 测试辅助函数：创建测试用的 CaptureItem
-    fn setup_test_capture_item() -> GraphicsCaptureItem {
-        print_all_monitors();
-        let monitor = get_primary_monitor().expect("无法获取显示器句柄");
-        create_capture_item_for_monitor(monitor).unwrap()
-    }
-
-    #[test]
-    fn test_wgc_capture_pipeline() {
-        use std::thread;
-        use std::time::Duration;
-        use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
-        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-        // 1. 准备环境
-        let d3d_ctx = create_d3d11_device().unwrap();
-        let item = setup_test_capture_item();
-
-        // 2. 初始化捕获会话
-        let capture = init_capture(&d3d_ctx, item).unwrap();
-        println!("✅ WGC 会话初始化成功");
-
-        // 3. 启动捕获
-        capture.start().unwrap();
-        println!("✅ 捕获已启动，等待帧...");
-
-        // 4. 等待一帧准备好 (100ms 足够大多数情况)
-        thread::sleep(Duration::from_millis(100));
-
-        // 5. 捕获一帧
-        let texture = capture.capture_frame().unwrap();
-        println!("✅ 成功获取帧");
-
-        // 6. 验证纹理格式 (关键步骤)
-        unsafe {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            texture.GetDesc(&mut desc);
-
-            println!("📊 纹理信息:");
-            println!("   格式: {:?} (预期: R16G16B16A16_FLOAT)", desc.Format);
-            println!("   尺寸: {}x{}", desc.Width, desc.Height);
-            println!("   MipLevels: {}", desc.MipLevels);
-
-            assert_eq!(
-                desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                "纹理格式必须是 FP16"
-            );
-            assert!(desc.Width > 0);
-            assert!(desc.Height > 0);
-            assert_eq!(desc.MipLevels, 1, "截图纹理不应有 Mipmaps");
-        }
-
-        println!("🎉 WGC 捕获管线测试通过！");
     }
 }
