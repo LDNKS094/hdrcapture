@@ -90,10 +90,70 @@ mod tests {
             println!("⚠️ 警告: 捕获到的图像全黑 (如果是黑屏则正常)");
         }
 
+        // 8. 保存首帧图像用于人工验证（Step 0.7）
+        save_test_image(&texture, &data, "test_capture.png");
+
         println!("🎉 WGC 捕获管线测试通过！");
     }
 
     // --- 测试辅助函数 ---
+
+    /// 保存测试图像（仅用于开发验证）
+    /// 将 R16G16B16A16_FLOAT 数据简单转换为 8-bit PNG
+    fn save_test_image(
+        texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        data: &[u8],
+        filename: &str,
+    ) {
+        use half::f16;
+        use image::{ImageBuffer, Rgba};
+
+        unsafe {
+            let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut desc);
+
+            let width = desc.Width as u32;
+            let height = desc.Height as u32;
+
+            // R16G16B16A16_FLOAT = 8 bytes per pixel (4 channels * 2 bytes)
+            let pixels_f16 = std::slice::from_raw_parts(
+                data.as_ptr() as *const f16,
+                (width * height * 4) as usize,
+            );
+
+            // 创建 8-bit RGBA 图像缓冲区
+            let mut img_buffer = ImageBuffer::new(width, height);
+
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = ((y * width + x) * 4) as usize;
+
+                    // 读取 f16 RGBA 值
+                    let r = pixels_f16[idx].to_f32();
+                    let g = pixels_f16[idx + 1].to_f32();
+                    let b = pixels_f16[idx + 2].to_f32();
+                    let a = pixels_f16[idx + 3].to_f32();
+
+                    // 简单 clamp 到 [0, 1] 并转换为 u8
+                    // 注意：此时图像可能仍然泛白（因为还没有色调映射）
+                    let r_u8 = (r.clamp(0.0, 1.0) * 255.0) as u8;
+                    let g_u8 = (g.clamp(0.0, 1.0) * 255.0) as u8;
+                    let b_u8 = (b.clamp(0.0, 1.0) * 255.0) as u8;
+                    let a_u8 = (a.clamp(0.0, 1.0) * 255.0) as u8;
+
+                    img_buffer.put_pixel(x, y, Rgba([r_u8, g_u8, b_u8, a_u8]));
+                }
+            }
+
+            // 保存为 PNG
+            img_buffer
+                .save(filename)
+                .expect("Failed to save test image");
+            println!("📸 测试图像已保存: {}", filename);
+            println!("   尺寸: {}x{}", width, height);
+            println!("   ⚠️  注意：图像可能泛白（正常现象，P1 阶段会修复）");
+        }
+    }
 
     /// 极简版获取主显示器句柄
     fn get_primary_monitor() -> HMONITOR {
