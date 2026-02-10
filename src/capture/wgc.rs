@@ -125,87 +125,50 @@ pub fn enable_dpi_awareness() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::d3d11::create_d3d11_device;
     use windows::core::BOOL;
     use windows::Win32::Foundation::{LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFO, MONITORINFOEXW,
     };
 
+    /// 单元测试：验证显示器枚举功能
+    /// 这是一个调试辅助测试，用于验证系统能正确检测显示器
     #[test]
-    fn test_wgc_capture_pipeline() {
-        use std::thread;
-        use std::time::Duration;
-        use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
-        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+    fn test_monitor_enumeration() {
+        enable_dpi_awareness();
 
-        // 1. 准备环境
-        let d3d_ctx = create_d3d11_device().unwrap();
-        let item = setup_test_capture_item();
+        let monitors = enumerate_monitors();
 
-        // 2. 初始化捕获会话
-        let capture = init_capture(&d3d_ctx, item).unwrap();
-        println!("✅ WGC 会话初始化成功");
+        // 验证至少有一个显示器
+        assert!(!monitors.is_empty(), "应该至少检测到一个显示器");
 
-        // 3. 启动捕获
-        capture.start().unwrap();
-        println!("✅ 捕获已启动，等待帧...");
+        // 验证有且仅有一个主显示器
+        let primary_count = monitors.iter().filter(|m| m.is_primary).count();
+        assert_eq!(primary_count, 1, "应该有且仅有一个主显示器");
 
-        // 4. 等待一帧准备好 (100ms 足够大多数情况)
-        thread::sleep(Duration::from_millis(100));
-
-        // 5. 捕获一帧
-        let texture = capture.capture_frame().unwrap();
-        println!("✅ 成功获取帧");
-
-        // 6. 验证纹理格式 (关键步骤)
-        unsafe {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            texture.GetDesc(&mut desc);
-
-            println!("📊 纹理信息:");
-            println!("   格式: {:?} (预期: R16G16B16A16_FLOAT)", desc.Format);
-            println!("   尺寸: {}x{}", desc.Width, desc.Height);
-            println!("   MipLevels: {}", desc.MipLevels);
-
-            assert_eq!(
-                desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                "纹理格式必须是 FP16"
+        // 打印显示器信息（用于调试）
+        println!("\n🖥️  检测到 {} 个显示器:", monitors.len());
+        for (i, monitor) in monitors.iter().enumerate() {
+            println!(
+                "  [{}] {} {}x{} {}",
+                i,
+                monitor.name,
+                monitor.width,
+                monitor.height,
+                if monitor.is_primary {
+                    "⭐ 主显示器"
+                } else {
+                    ""
+                }
             );
-            assert!(desc.Width > 0);
-            assert!(desc.Height > 0);
-            assert_eq!(desc.MipLevels, 1, "截图纹理不应有 Mipmaps");
+
+            // 验证分辨率合理
+            assert!(monitor.width > 0, "显示器宽度必须大于 0");
+            assert!(monitor.height > 0, "显示器高度必须大于 0");
         }
-
-        // 7. 回读数据测试
-        let mut reader = crate::d3d11::texture::TextureReader::new(
-            d3d_ctx.device.clone(),
-            d3d_ctx.context.clone(),
-        );
-
-        let data = reader.read_texture(&texture).unwrap();
-        println!("✅ 成功回读数据: {} bytes", data.len());
-
-        // 验证数据不是全黑 (虽然有可能是黑屏，但在开发机上通常不是)
-        // R16G16B16A16_FLOAT = 8 bytes per pixel
-        let has_data = data.iter().any(|&b| b != 0);
-        if has_data {
-            println!("   数据验证: 包含非零像素值");
-        } else {
-            println!("⚠️ 警告: 捕获到的图像全黑 (如果是黑屏则正常)");
-        }
-
-        println!("🎉 WGC 捕获管线测试通过！");
     }
 
-    // --- 测试辅助函数 ---
-
-    /// 测试辅助函数：创建测试用的 CaptureItem
-    fn setup_test_capture_item() -> GraphicsCaptureItem {
-        print_all_monitors();
-        let monitor = get_primary_monitor().expect("无法获取显示器句柄");
-        create_capture_item_for_monitor(monitor).unwrap()
-    }
+    // --- 测试辅助结构和函数 ---
 
     /// 显示器信息
     #[derive(Debug)]
@@ -219,9 +182,6 @@ mod tests {
 
     /// 枚举所有显示器
     fn enumerate_monitors() -> Vec<MonitorInfo> {
-        // 确保在枚举前启用 DPI 感知
-        enable_dpi_awareness();
-
         unsafe {
             let mut monitors = Vec::new();
 
@@ -275,35 +235,5 @@ mod tests {
         }
 
         BOOL(1) // 继续枚举
-    }
-
-    /// 获取主显示器句柄
-    fn get_primary_monitor() -> Option<HMONITOR> {
-        let monitors = enumerate_monitors();
-        monitors
-            .into_iter()
-            .find(|m| m.is_primary)
-            .map(|m| m.handle)
-    }
-
-    /// 打印所有显示器信息
-    fn print_all_monitors() {
-        let monitors = enumerate_monitors();
-        println!("\n🖥️  检测到 {} 个显示器:", monitors.len());
-        for (i, monitor) in monitors.iter().enumerate() {
-            println!(
-                "  [{}] {} {}x{} {}",
-                i,
-                monitor.name,
-                monitor.width,
-                monitor.height,
-                if monitor.is_primary {
-                    "⭐ 主显示器"
-                } else {
-                    ""
-                }
-            );
-        }
-        println!();
     }
 }

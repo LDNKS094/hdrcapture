@@ -109,3 +109,75 @@ impl TextureReader {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::d3d11::create_d3d11_device;
+
+    #[test]
+    fn test_texture_readback_logic() {
+        let d3d_ctx = create_d3d11_device().unwrap();
+        let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
+
+        // 1. 创建一个 2x2 的源纹理 (Default Usage)
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 2,
+            Height: 2,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: 0,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+
+        // 2. 准备初始化数据
+        // 每个像素 4 个 f16 (RGBA)，2x2 共 4 个像素
+        // 假设全红：(1.0, 0.0, 0.0, 1.0)
+        // f16::from_f32(1.0) -> 0x3C00
+        // f16::from_f32(0.0) -> 0x0000
+        let pixel_red: [u16; 4] = [0x3C00, 0x0000, 0x0000, 0x3C00];
+        let mut init_data = Vec::new();
+        for _ in 0..4 {
+            init_data.extend_from_slice(&pixel_red); // 4 个像素
+        }
+
+        // 重要：创建 Initialize Data 描述
+        // SysMemPitch: 每行字节数 = 2 像素 * 8 字节 = 16
+        let subresource_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: init_data.as_ptr() as *const _,
+            SysMemPitch: 16,
+            SysMemSlicePitch: 0,
+        };
+
+        unsafe {
+            let mut texture = None;
+            d3d_ctx
+                .device
+                .CreateTexture2D(&desc, Some(&subresource_data), Some(&mut texture))
+                .unwrap();
+            let texture = texture.unwrap();
+
+            // 3. 读取数据
+            let data = reader.read_texture(&texture).unwrap();
+
+            // 4. 验证
+            // 注意：data 可能包含 RowPitch 填充，所以不能直接比较 Vec
+            // 2x2 纹理通常太小，显卡可能会按 256 字节对齐
+            println!("Readback data size: {}", data.len());
+
+            // 验证第一个像素
+            let u16_data = std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2);
+            assert_eq!(u16_data[0], 0x3C00); // R
+            assert_eq!(u16_data[1], 0x0000); // G
+            assert_eq!(u16_data[2], 0x0000); // B
+            assert_eq!(u16_data[3], 0x3C00); // A
+        }
+    }
+}
