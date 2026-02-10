@@ -177,6 +177,24 @@ mod tests {
             assert_eq!(desc.MipLevels, 1, "截图纹理不应有 Mipmaps");
         }
 
+        // 7. 回读数据测试
+        let mut reader = crate::d3d11::texture::TextureReader::new(
+            d3d_ctx.device.clone(),
+            d3d_ctx.context.clone(),
+        );
+
+        let data = reader.read_texture(&texture).unwrap();
+        println!("✅ 成功回读数据: {} bytes", data.len());
+
+        // 验证数据不是全黑 (虽然有可能是黑屏，但在开发机上通常不是)
+        // R16G16B16A16_FLOAT = 8 bytes per pixel
+        let has_data = data.iter().any(|&b| b != 0);
+        if has_data {
+            println!("   数据验证: 包含非零像素值");
+        } else {
+            println!("⚠️ 警告: 捕获到的图像全黑 (如果是黑屏则正常)");
+        }
+
         println!("🎉 WGC 捕获管线测试通过！");
     }
 

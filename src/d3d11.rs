@@ -36,7 +36,9 @@ pub fn create_d3d11_device() -> anyhow::Result<D3D11Context> {
             None,
             Some(&mut context),
         )
-        .context("Failed to create D3D11 device")?(device.unwrap(), context.unwrap())
+        .context("Failed to create D3D11 device")?;
+
+        (device.unwrap(), context.unwrap())
     };
 
     let dxgi_device: IDXGIDevice = device.cast().unwrap();
