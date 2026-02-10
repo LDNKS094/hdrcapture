@@ -18,15 +18,15 @@ pub(crate) mod tonemap;
 
 #[cfg(test)]
 mod tests {
-    use crate::capture::wgc::{
-        create_capture_item_for_monitor, enable_dpi_awareness, init_capture,
-    };
+    use crate::capture::{enable_dpi_awareness, init_capture, CaptureTarget};
     use crate::d3d11::create_d3d11_device;
     use crate::d3d11::texture::TextureReader;
     use windows::core::BOOL;
     use windows::Win32::Foundation::{LPARAM, RECT};
     use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
-    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    };
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 
     /// 内部集成测试：验证 WGC 捕获管线（Device -> Capture -> Texture Readback）
@@ -41,11 +41,12 @@ mod tests {
 
         let d3d_ctx = create_d3d11_device().unwrap();
         let monitor = get_primary_monitor();
-        let item = create_capture_item_for_monitor(monitor).unwrap();
 
-        // 2. 初始化捕获会话
-        let capture = init_capture(&d3d_ctx, item).unwrap();
+        // 2. 初始化捕获会话（使用 CaptureTarget 枚举）
+        let target = CaptureTarget::Monitor(monitor);
+        let capture = init_capture(&d3d_ctx, target).unwrap();
         println!("✅ WGC 会话初始化成功");
+        println!("   HDR 模式: {}", if capture.is_hdr { "是" } else { "否" });
 
         // 3. 启动捕获
         capture.start().unwrap();
@@ -64,14 +65,18 @@ mod tests {
             texture.GetDesc(&mut desc);
 
             println!("📊 纹理信息:");
-            println!("   格式: {:?} (预期: R16G16B16A16_FLOAT)", desc.Format);
+            println!("   格式: {:?}", desc.Format);
             println!("   尺寸: {}x{}", desc.Width, desc.Height);
             println!("   MipLevels: {}", desc.MipLevels);
 
-            assert_eq!(
-                desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                "纹理格式必须是 FP16"
-            );
+            // 根据 HDR 状态验证格式
+            let expected_format = if capture.is_hdr {
+                DXGI_FORMAT_R16G16B16A16_FLOAT
+            } else {
+                DXGI_FORMAT_B8G8R8A8_UNORM
+            };
+
+            assert_eq!(desc.Format, expected_format, "纹理格式必须与 HDR 状态匹配");
             assert!(desc.Width > 0);
             assert!(desc.Height > 0);
             assert_eq!(desc.MipLevels, 1, "截图纹理不应有 Mipmaps");
@@ -91,7 +96,7 @@ mod tests {
         }
 
         // 8. 保存首帧图像用于人工验证（Step 0.7）
-        save_test_image(&texture, &data, "test_capture.png");
+        save_test_image(&texture, &data, &capture, "test_capture.png");
 
         println!("🎉 WGC 捕获管线测试通过！");
     }
@@ -99,10 +104,12 @@ mod tests {
     // --- 测试辅助函数 ---
 
     /// 保存测试图像（仅用于开发验证）
-    /// 将 R16G16B16A16_FLOAT 数据简单转换为 8-bit PNG
+    /// 将纹理数据转换为 8-bit PNG
+    /// 支持 HDR (R16G16B16A16_FLOAT) 和 SDR (B8G8R8A8_UNORM) 格式
     fn save_test_image(
         texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
         data: &[u8],
+        capture: &crate::capture::wgc::WGCCapture,
         filename: &str,
     ) {
         use half::f16;
@@ -115,33 +122,50 @@ mod tests {
             let width = desc.Width as u32;
             let height = desc.Height as u32;
 
-            // R16G16B16A16_FLOAT = 8 bytes per pixel (4 channels * 2 bytes)
-            let pixels_f16 = std::slice::from_raw_parts(
-                data.as_ptr() as *const f16,
-                (width * height * 4) as usize,
-            );
-
             // 创建 8-bit RGBA 图像缓冲区
             let mut img_buffer = ImageBuffer::new(width, height);
 
-            for y in 0..height {
-                for x in 0..width {
-                    let idx = ((y * width + x) * 4) as usize;
+            if capture.is_hdr {
+                // HDR 格式: R16G16B16A16_FLOAT = 8 bytes per pixel (4 channels * 2 bytes)
+                let pixels_f16 = std::slice::from_raw_parts(
+                    data.as_ptr() as *const f16,
+                    (width * height * 4) as usize,
+                );
 
-                    // 读取 f16 RGBA 值
-                    let r = pixels_f16[idx].to_f32();
-                    let g = pixels_f16[idx + 1].to_f32();
-                    let b = pixels_f16[idx + 2].to_f32();
-                    let a = pixels_f16[idx + 3].to_f32();
+                for y in 0..height {
+                    for x in 0..width {
+                        let idx = ((y * width + x) * 4) as usize;
 
-                    // 简单 clamp 到 [0, 1] 并转换为 u8
-                    // 注意：此时图像可能仍然泛白（因为还没有色调映射）
-                    let r_u8 = (r.clamp(0.0, 1.0) * 255.0) as u8;
-                    let g_u8 = (g.clamp(0.0, 1.0) * 255.0) as u8;
-                    let b_u8 = (b.clamp(0.0, 1.0) * 255.0) as u8;
-                    let a_u8 = (a.clamp(0.0, 1.0) * 255.0) as u8;
+                        // 读取 f16 RGBA 值
+                        let r = pixels_f16[idx].to_f32();
+                        let g = pixels_f16[idx + 1].to_f32();
+                        let b = pixels_f16[idx + 2].to_f32();
+                        let a = pixels_f16[idx + 3].to_f32();
 
-                    img_buffer.put_pixel(x, y, Rgba([r_u8, g_u8, b_u8, a_u8]));
+                        // 简单 clamp 到 [0, 1] 并转换为 u8
+                        // 注意：此时图像可能仍然泛白（因为还没有色调映射）
+                        let r_u8 = (r.clamp(0.0, 1.0) * 255.0) as u8;
+                        let g_u8 = (g.clamp(0.0, 1.0) * 255.0) as u8;
+                        let b_u8 = (b.clamp(0.0, 1.0) * 255.0) as u8;
+                        let a_u8 = (a.clamp(0.0, 1.0) * 255.0) as u8;
+
+                        img_buffer.put_pixel(x, y, Rgba([r_u8, g_u8, b_u8, a_u8]));
+                    }
+                }
+            } else {
+                // SDR 格式: B8G8R8A8_UNORM = 4 bytes per pixel
+                for y in 0..height {
+                    for x in 0..width {
+                        let idx = ((y * width + x) * 4) as usize;
+
+                        // BGRA 格式，需要转换为 RGBA
+                        let b = data[idx];
+                        let g = data[idx + 1];
+                        let r = data[idx + 2];
+                        let a = data[idx + 3];
+
+                        img_buffer.put_pixel(x, y, Rgba([r, g, b, a]));
+                    }
                 }
             }
 
@@ -151,7 +175,17 @@ mod tests {
                 .expect("Failed to save test image");
             println!("📸 测试图像已保存: {}", filename);
             println!("   尺寸: {}x{}", width, height);
-            println!("   ⚠️  注意：图像可能泛白（正常现象，P1 阶段会修复）");
+            println!(
+                "   格式: {}",
+                if capture.is_hdr {
+                    "HDR (16-bit)"
+                } else {
+                    "SDR (8-bit)"
+                }
+            );
+            if capture.is_hdr {
+                println!("   ⚠️  注意：HDR 图像可能泛白（正常现象，P1 阶段会修复）");
+            }
         }
     }
 
