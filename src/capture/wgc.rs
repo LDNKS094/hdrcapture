@@ -1,12 +1,16 @@
 // Windows Graphics Capture 实现
 
 use anyhow::{Context, Result};
+use windows::core::Interface;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
+use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
 use crate::d3d11::D3D11Context;
@@ -16,6 +20,29 @@ pub struct WGCCapture {
     pub item: GraphicsCaptureItem,
     pub frame_pool: Direct3D11CaptureFramePool,
     pub session: GraphicsCaptureSession,
+}
+
+impl WGCCapture {
+    /// 启动捕获
+    pub fn start(&self) -> Result<()> {
+        self.session.StartCapture()?;
+        Ok(())
+    }
+
+    /// 捕获一帧并返回 ID3D11Texture2D
+    pub fn capture_frame(&self) -> Result<ID3D11Texture2D> {
+        // 从 FramePool 获取帧
+        let frame = self.frame_pool.TryGetNextFrame()?;
+
+        // 从 Frame 获取 IDirect3DSurface
+        let surface: IDirect3DSurface = frame.Surface()?;
+
+        // 通过 COM 互操作获取底层 ID3D11Texture2D
+        let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
+        let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
+
+        Ok(texture)
+    }
 }
 
 /// 从显示器句柄创建 GraphicsCaptureItem
@@ -75,59 +102,170 @@ mod tests {
     use crate::d3d11::create_d3d11_device;
     use windows::core::BOOL;
     use windows::Win32::Foundation::{LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, MONITORINFO, MONITORINFOEXW,
+    };
 
-    // 获取主显示器句柄（用于测试）
-    fn get_primary_monitor() -> Option<HMONITOR> {
+    /// 显示器信息
+    #[derive(Debug)]
+    struct MonitorInfo {
+        handle: HMONITOR,
+        name: String,
+        is_primary: bool,
+        width: i32,
+        height: i32,
+    }
+
+    /// 枚举所有显示器
+    fn enumerate_monitors() -> Vec<MonitorInfo> {
         unsafe {
-            let mut monitor = None;
+            let mut monitors = Vec::new();
 
             let _ = EnumDisplayMonitors(
                 Some(HDC::default()),
                 None,
-                Some(monitor_enum_proc),
-                LPARAM(&mut monitor as *mut _ as isize),
+                Some(enum_monitors_proc),
+                LPARAM(&mut monitors as *mut _ as isize),
             );
 
-            monitor
+            monitors
         }
     }
 
-    unsafe extern "system" fn monitor_enum_proc(
+    unsafe extern "system" fn enum_monitors_proc(
         hmonitor: HMONITOR,
         _: HDC,
         _: *mut RECT,
         lparam: LPARAM,
     ) -> BOOL {
-        let monitor_ptr = lparam.0 as *mut Option<HMONITOR>;
-        *monitor_ptr = Some(hmonitor);
-        BOOL(0) // 返回 false 停止枚举（只获取第一个）
+        let monitors = &mut *(lparam.0 as *mut Vec<MonitorInfo>);
+
+        // 获取显示器信息
+        let mut monitor_info = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        if GetMonitorInfoW(hmonitor, &mut monitor_info.monitorInfo as *mut _ as *mut _).as_bool() {
+            let name = String::from_utf16_lossy(&monitor_info.szDevice)
+                .trim_end_matches('\0')
+                .to_string();
+
+            let is_primary = (monitor_info.monitorInfo.dwFlags & 1) != 0; // MONITORINFOF_PRIMARY = 1
+
+            let width =
+                monitor_info.monitorInfo.rcMonitor.right - monitor_info.monitorInfo.rcMonitor.left;
+            let height =
+                monitor_info.monitorInfo.rcMonitor.bottom - monitor_info.monitorInfo.rcMonitor.top;
+
+            monitors.push(MonitorInfo {
+                handle: hmonitor,
+                name,
+                is_primary,
+                width,
+                height,
+            });
+        }
+
+        BOOL(1) // 继续枚举
     }
 
-    #[test]
-    fn test_create_capture_item() {
+    /// 获取主显示器句柄
+    fn get_primary_monitor() -> Option<HMONITOR> {
+        let monitors = enumerate_monitors();
+        monitors
+            .into_iter()
+            .find(|m| m.is_primary)
+            .map(|m| m.handle)
+    }
+
+    /// 打印所有显示器信息
+    fn print_all_monitors() {
+        let monitors = enumerate_monitors();
+        println!("\n🖥️  检测到 {} 个显示器:", monitors.len());
+        for (i, monitor) in monitors.iter().enumerate() {
+            println!(
+                "  [{}] {} {}x{} {}",
+                i,
+                monitor.name,
+                monitor.width,
+                monitor.height,
+                if monitor.is_primary {
+                    "⭐ 主显示器"
+                } else {
+                    ""
+                }
+            );
+        }
+        println!();
+    }
+
+    /// 测试辅助函数：创建测试用的 CaptureItem
+    fn setup_test_capture_item() -> GraphicsCaptureItem {
+        print_all_monitors();
         let monitor = get_primary_monitor().expect("无法获取显示器句柄");
-        let item = create_capture_item_for_monitor(monitor).expect("创建 CaptureItem 失败");
-
-        // 验证可以获取尺寸
-        let size = item.Size().expect("无法获取尺寸");
-        assert!(size.Width > 0);
-        assert!(size.Height > 0);
-
-        println!("✅ CaptureItem 创建成功: {}x{}", size.Width, size.Height);
+        create_capture_item_for_monitor(monitor).unwrap()
     }
 
     #[test]
     fn test_init_capture() {
-        let d3d_ctx = create_d3d11_device().expect("D3D11 设备创建失败");
-        let monitor = get_primary_monitor().expect("无法获取显示器句柄");
-        let item = create_capture_item_for_monitor(monitor).expect("创建 CaptureItem 失败");
+        let d3d_ctx = create_d3d11_device().unwrap();
+        let item = setup_test_capture_item();
 
-        let capture = init_capture(&d3d_ctx, item).expect("初始化捕获失败");
+        let size = item.Size().unwrap();
+        assert!(size.Width > 0);
+        assert!(size.Height > 0);
+
+        println!("✅ CaptureItem 创建成功: {}x{}", size.Width, size.Height);
+
+        let capture = init_capture(&d3d_ctx, item).unwrap();
 
         // 验证会话已创建
         assert!(capture.session.IsCursorCaptureEnabled().is_ok());
 
         println!("✅ WGC 捕获会话测试通过");
+    }
+
+    #[test]
+    fn test_capture_frame() {
+        use std::thread;
+        use std::time::Duration;
+        use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        let d3d_ctx = create_d3d11_device().unwrap();
+        let item = setup_test_capture_item();
+
+        let capture = init_capture(&d3d_ctx, item).unwrap();
+
+        // 启动捕获
+        capture.start().unwrap();
+
+        // 等待一帧准备好
+        thread::sleep(Duration::from_millis(100));
+
+        // 捕获一帧
+        let texture = capture.capture_frame().unwrap();
+
+        // 验证纹理格式
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut desc);
+
+            println!("📊 纹理信息:");
+            println!("   格式: {:?}", desc.Format);
+            println!("   尺寸: {}x{}", desc.Width, desc.Height);
+            println!("   MipLevels: {}", desc.MipLevels);
+
+            // 验证格式是 R16G16B16A16_FLOAT
+            assert_eq!(desc.Format, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            assert!(desc.Width > 0);
+            assert!(desc.Height > 0);
+        }
+
+        println!("✅ 帧捕获测试通过");
     }
 }
