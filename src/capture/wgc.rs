@@ -36,10 +36,10 @@ pub enum CaptureTarget {
 
 /// WGC 捕获会话
 pub struct WGCCapture {
-    pub item: GraphicsCaptureItem,
-    pub frame_pool: Direct3D11CaptureFramePool,
-    pub session: GraphicsCaptureSession,
-    pub target: CaptureTarget,
+    /// 持有所有权，drop 时停止捕获
+    _item: GraphicsCaptureItem,
+    frame_pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
 }
 
 impl WGCCapture {
@@ -75,16 +75,6 @@ impl WGCCapture {
         };
 
         Ok(texture)
-    }
-
-    /// 捕获一帧并返回 ID3D11Texture2D
-    ///
-    /// 注意：此方法在返回前会 drop Frame 对象，归还 buffer 给 FramePool。
-    /// 调用方应尽快使用返回的 texture（如 CopyResource），避免 DWM 覆盖 surface。
-    /// 推荐使用 `CapturePipeline` 替代，它能正确管理 Frame 生命周期。
-    pub fn capture_frame(&self) -> Result<ID3D11Texture2D> {
-        let frame = self.try_get_next_frame()?;
-        Self::frame_to_texture(&frame)
     }
 }
 
@@ -151,9 +141,8 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
     session.SetIsBorderRequired(false)?;
 
     Ok(WGCCapture {
-        item,
+        _item: item,
         frame_pool,
         session,
-        target,
     })
 }

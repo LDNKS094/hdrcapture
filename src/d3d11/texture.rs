@@ -1,16 +1,15 @@
 // 纹理创建与回读工具函数
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
 /// 根据 DXGI_FORMAT 返回每像素字节数
-fn bytes_per_pixel(format: DXGI_FORMAT) -> usize {
+fn bytes_per_pixel(format: DXGI_FORMAT) -> Result<usize> {
     match format {
-        DXGI_FORMAT_R16G16B16A16_FLOAT => 8, // 4 × f16
-        DXGI_FORMAT_B8G8R8A8_UNORM => 4,     // 4 × u8
-        DXGI_FORMAT_R8G8B8A8_UNORM => 4,     // 4 × u8
-        _ => panic!("Unsupported DXGI_FORMAT: {:?}", format),
+        DXGI_FORMAT_R16G16B16A16_FLOAT => Ok(8), // 4 × f16
+        DXGI_FORMAT_B8G8R8A8_UNORM => Ok(4),     // 4 × u8
+        _ => bail!("Unsupported DXGI_FORMAT: {:?}", format),
     }
 }
 
@@ -85,7 +84,7 @@ impl TextureReader {
         }
 
         // 预分配 buffer（尺寸变化时自动调整，不缩小）
-        let required = width as usize * height as usize * bytes_per_pixel(format);
+        let required = width as usize * height as usize * bytes_per_pixel(format)?;
         if self.buffer.len() < required {
             self.buffer.resize(required, 0);
         }
@@ -103,7 +102,7 @@ impl TextureReader {
             source_texture.GetDesc(&mut desc);
         }
 
-        let bpp = bytes_per_pixel(desc.Format);
+        let bpp = bytes_per_pixel(desc.Format)?;
 
         self.ensure_staging_texture(desc.Width, desc.Height, desc.Format)?;
         let staging = self.staging_texture.as_ref().unwrap();
