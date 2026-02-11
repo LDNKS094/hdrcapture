@@ -5,7 +5,7 @@ use hdrcapture::pipeline::CapturePipeline;
 
 fn capture_monitor(index: usize) {
     let mut pipeline = CapturePipeline::monitor(index).unwrap();
-    let frame = pipeline.capture_frame().unwrap();
+    let frame = pipeline.capture().unwrap();
 
     assert!(frame.width > 0 && frame.height > 0);
     assert!(

@@ -31,7 +31,7 @@ fn test_capture_target_window() {
     }
 
     let mut pipeline = CapturePipeline::window(TARGET_PROCESS, Some(TARGET_INDEX)).unwrap();
-    let frame = pipeline.capture_frame().unwrap();
+    let frame = pipeline.capture().unwrap();
 
     assert!(frame.width > 0 && frame.height > 0);
     assert!(

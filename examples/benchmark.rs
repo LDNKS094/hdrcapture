@@ -1,8 +1,8 @@
-// 性能基准测试：测量 capture_frame() 延迟
+// 性能基准测试：测量 capture() / grab() 延迟
 //
 // 测试场景：
-// 1. 单帧截图：新建 pipeline → capture_frame()，测端到端延迟
-// 2. 连续取帧：pipeline 热启动后连续 capture_frame()，测稳态延迟
+// 1. 单帧截图：新建 pipeline → capture()，测端到端延迟
+// 2. 连续取帧：pipeline 热启动后连续取帧，测稳态延迟
 //
 // 分别对显示器和窗口执行，结果保存到 tests/results/
 //
@@ -101,7 +101,7 @@ fn target_label(target: &Target) -> String {
     }
 }
 
-/// 单帧截图：每次新建 pipeline → capture_frame()，测端到端延迟
+/// 单帧截图：每次新建 pipeline → capture()，测端到端延迟
 fn bench_single_shot(target: &Target, report: &mut String) {
     let label = target_label(target);
     let mut durations = Vec::with_capacity(SINGLE_SHOT_ROUNDS);
@@ -113,7 +113,7 @@ fn bench_single_shot(target: &Target, report: &mut String) {
             Some(p) => p,
             None => return,
         };
-        let frame = pipeline.capture_frame().unwrap();
+        let frame = pipeline.capture().unwrap();
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         durations.push(elapsed_ms);
 
@@ -138,20 +138,23 @@ fn bench_single_shot(target: &Target, report: &mut String) {
     write!(report, "{s}").unwrap();
 }
 
-/// 连续取帧：pipeline 热启动后连续 capture_frame()
-fn bench_streaming(target: &Target, fresh: bool, report: &mut String) {
+/// 连续取帧：pipeline 热启动后连续取帧
+fn bench_streaming(target: &Target, use_capture: bool, report: &mut String) {
     let label = target_label(target);
-    let mode = if fresh { "fresh" } else { "drain" };
+    let mode = if use_capture { "capture" } else { "grab" };
 
     let mut pipeline = match create_pipeline(target) {
         Some(p) => p,
         None => return,
     };
-    pipeline.fresh = fresh;
 
     // 预热
     for _ in 0..WARMUP_FRAMES {
-        pipeline.capture_frame().unwrap();
+        if use_capture {
+            pipeline.capture().unwrap();
+        } else {
+            pipeline.grab().unwrap();
+        }
     }
 
     let mut durations = Vec::with_capacity(STREAMING_FRAMES);
@@ -159,7 +162,11 @@ fn bench_streaming(target: &Target, fresh: bool, report: &mut String) {
 
     for i in 0..STREAMING_FRAMES {
         let t = Instant::now();
-        let frame = pipeline.capture_frame().unwrap();
+        let frame = if use_capture {
+            pipeline.capture().unwrap()
+        } else {
+            pipeline.grab().unwrap()
+        };
         let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
         durations.push(elapsed_ms);
 

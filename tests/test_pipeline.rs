@@ -6,7 +6,7 @@ use hdrcapture::pipeline::CapturePipeline;
 fn test_pipeline_monitor_capture() {
     let mut pipeline = CapturePipeline::monitor(0).expect("Failed to create pipeline");
 
-    let frame = pipeline.capture_frame().expect("Failed to capture frame");
+    let frame = pipeline.capture().expect("Failed to capture frame");
 
     assert!(frame.width > 0 && frame.height > 0, "Invalid dimensions");
     assert_eq!(
@@ -34,7 +34,7 @@ fn test_pipeline_consecutive_frames() {
     // 连续捕获 3 帧，验证排空策略和 buffer 复用
     for i in 0..3 {
         let frame = pipeline
-            .capture_frame()
+            .capture()
             .unwrap_or_else(|e| panic!("Frame {} failed: {}", i, e));
 
         assert!(frame.data.iter().any(|&b| b != 0), "Frame {} all black", i);

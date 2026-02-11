@@ -1,7 +1,8 @@
 // 捕获管线：target 解析 → WGC 初始化 → 帧捕获 → 纹理回读
 //
-// 同步模式（方案 A）：每次 capture_frame() 排空积压帧后取帧 → CopyResource + Map。
-// fresh=true 时排空后等全新帧（截图），fresh=false 时排空取最后一帧（连续取帧）。
+// 提供两种取帧模式：
+// - capture()：排空积压帧后等全新帧，适合截图（保证帧是调用之后产生的）
+// - grab()：排空积压帧取最后一帧，适合连续取帧（延迟更低）
 // Frame 生命周期覆盖 CopyResource，确保 DWM 不会覆盖正在读取的 surface。
 
 use std::path::Path;
@@ -61,17 +62,13 @@ impl CapturedFrame {
 /// ```no_run
 /// # use hdrcapture::pipeline::CapturePipeline;
 /// let mut pipeline = CapturePipeline::monitor(0).unwrap();
-/// let frame = pipeline.capture_frame().unwrap();
+/// let frame = pipeline.capture().unwrap();
 /// println!("{}x{}, {} bytes", frame.width, frame.height, frame.data.len());
 /// ```
 pub struct CapturePipeline {
     _d3d_ctx: D3D11Context,
     capture: WGCCapture,
     reader: TextureReader,
-    /// 是否等待全新帧。
-    /// - `true`（默认）：排空积压帧后等待 DWM 推送新帧，适合截图场景。
-    /// - `false`：排空后直接取最后一帧，适合高频连续取帧场景。
-    pub fresh: bool,
     /// 首次调用标记。StartCapture() 后的首帧天然是 fresh 的，
     /// 无需 drain-discard，直接取即可省 ~1 VSync。
     first_call: bool,
@@ -107,7 +104,6 @@ impl CapturePipeline {
             _d3d_ctx: d3d_ctx,
             capture,
             reader,
-            fresh: true,
             first_call: true,
         })
     }
@@ -152,17 +148,13 @@ impl CapturePipeline {
         })
     }
 
-    /// 捕获一帧，返回 BGRA8 像素数据及尺寸
+    /// 截图模式：捕获一帧全新的画面
     ///
-    /// 行为取决于 `fresh` 字段：
-    /// - `true`：排空积压帧 → 等待全新帧，保证帧是调用之后产生的（多等 ~1 VSync）。
-    /// - `false`：排空积压帧 → 取最后一帧，延迟更低但可能拿到稍早的帧。
+    /// 排空积压帧 → 等待 DWM 推送新帧，保证返回的帧是调用之后产生的。
+    /// 首次调用时跳过排空（首帧天然是 fresh 的）。
     ///
-    /// 首次调用时跳过排空逻辑，因为 StartCapture() 后的首帧天然是 fresh 的。
-    ///
-    /// Frame 生命周期覆盖 CopyResource，确保数据安全。
-    /// 返回的 `CapturedFrame` 拥有数据所有权，可自由传递到其他线程。
-    pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
+    /// 适合截图场景，延迟 ~1 VSync。
+    pub fn capture(&mut self) -> Result<CapturedFrame> {
         let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
 
         // 首次调用：StartCapture() 后的首帧天然是 fresh 的，直接取即可
@@ -172,21 +164,52 @@ impl CapturePipeline {
             return self.read_frame(&frame);
         }
 
-        // 后续调用：排空积压帧，fresh 模式丢弃所有，非 fresh 模式保留最后一帧
-        let mut latest = None;
-        while let Ok(f) = self.capture.try_get_next_frame() {
-            if !self.fresh {
-                latest = Some(f);
-            }
+        // 排空积压帧（全部丢弃）
+        while self.capture.try_get_next_frame().is_ok() {}
+
+        // 等待全新帧
+        let frame = self.wait_frame(deadline)?;
+        self.read_frame(&frame)
+    }
+
+    /// 连续取帧模式：抓取最新可用帧
+    ///
+    /// 排空积压帧，保留最后一帧；池空时等待新帧。
+    /// 返回的帧可能是调用之前产生的，但延迟更低。
+    ///
+    /// 适合高频连续取帧场景。
+    pub fn grab(&mut self) -> Result<CapturedFrame> {
+        let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+
+        // 首次调用：直接取首帧
+        if self.first_call {
+            self.first_call = false;
+            let frame = self.wait_frame(deadline)?;
+            return self.read_frame(&frame);
         }
 
-        // 取帧：fresh 模式或池空时等待新帧，否则用排空拿到的最后一帧
+        // 排空积压帧，保留最后一帧
+        let mut latest = None;
+        while let Ok(f) = self.capture.try_get_next_frame() {
+            latest = Some(f);
+        }
+
         let frame = match latest {
             Some(f) => f,
             None => self.wait_frame(deadline)?,
         };
 
-        // frame 在 read_frame 返回后 drop，buffer 归还给 FramePool
         self.read_frame(&frame)
     }
+}
+
+/// 一行截图：创建管线 → 捕获一帧 → 返回
+///
+/// 适合只需要截一张图的场景。内部创建并销毁 pipeline，
+/// 冷启动 ~79ms（含 D3D11 设备创建 + WGC 会话创建 + 首帧等待）。
+///
+/// 如需多次截图，请使用 `CapturePipeline` 复用管线。
+pub fn screenshot(monitor_index: usize) -> Result<CapturedFrame> {
+    let mut pipeline = CapturePipeline::monitor(monitor_index)?;
+    pipeline.capture()
 }
