@@ -22,6 +22,7 @@ pub struct TextureReader {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     staging_texture: Option<ID3D11Texture2D>,
+    buffer: Vec<u8>,
     width: u32,
     height: u32,
     format: DXGI_FORMAT,
@@ -33,6 +34,7 @@ impl TextureReader {
             device,
             context,
             staging_texture: None,
+            buffer: Vec::new(),
             width: 0,
             height: 0,
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -82,13 +84,20 @@ impl TextureReader {
             self.format = format;
         }
 
+        // 预分配 buffer（尺寸变化时自动调整，不缩小）
+        let required = width as usize * height as usize * bytes_per_pixel(format);
+        if self.buffer.len() < required {
+            self.buffer.resize(required, 0);
+        }
+
         Ok(())
     }
 
     /// 从 GPU 纹理读取数据到 CPU
     ///
-    /// 返回的 buffer 已剥离 RowPitch 填充，每行恰好 `width * bytes_per_pixel` 字节。
-    pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
+    /// 返回的切片已剥离 RowPitch 填充，每行恰好 `width * bytes_per_pixel` 字节。
+    /// 数据有效期到下一次 `read_texture` 调用为止（复用内部 buffer）。
+    pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<&[u8]> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             source_texture.GetDesc(&mut desc);
@@ -109,27 +118,25 @@ impl TextureReader {
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .context("Failed to map staging texture")?;
 
-            let row_pitch = mapped.RowPitch as usize; // GPU 实际行宽（含对齐填充）
-            let row_bytes = desc.Width as usize * bpp; // 有效像素数据行宽
+            let row_pitch = mapped.RowPitch as usize;
+            let row_bytes = desc.Width as usize * bpp;
             let height = desc.Height as usize;
 
-            // 逐行拷贝，剥离 RowPitch 末尾填充
-            let mut buffer = vec![0u8; row_bytes * height];
+            // 逐行拷贝到内部 buffer，剥离 RowPitch 末尾填充
             let src = mapped.pData as *const u8;
-
             for y in 0..height {
                 // SAFETY: src 指向 mapped GPU 内存，row_pitch * y + row_bytes 不超过映射范围；
-                //         buffer 已分配 row_bytes * height 字节。
+                //         self.buffer 已在 ensure_staging_texture 中预分配足够空间。
                 std::ptr::copy_nonoverlapping(
                     src.add(y * row_pitch),
-                    buffer.as_mut_ptr().add(y * row_bytes),
+                    self.buffer.as_mut_ptr().add(y * row_bytes),
                     row_bytes,
                 );
             }
 
             self.context.Unmap(staging, 0);
 
-            Ok(buffer)
+            Ok(&self.buffer[..row_bytes * height])
         }
     }
 }
