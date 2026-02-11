@@ -95,9 +95,9 @@ impl TextureReader {
 
     /// 从 GPU 纹理读取数据到 CPU
     ///
-    /// 返回的切片已剥离 RowPitch 填充，每行恰好 `width * bytes_per_pixel` 字节。
-    /// 数据有效期到下一次 `read_texture` 调用为止（复用内部 buffer）。
-    pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<&[u8]> {
+    /// 返回拥有所有权的 `Vec<u8>`，已剥离 RowPitch 填充，每行恰好 `width * bytes_per_pixel` 字节。
+    /// 内部复用 scratch buffer 避免重复分配，返回时执行一次 memcpy 交付所有权。
+    pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             source_texture.GetDesc(&mut desc);
@@ -122,7 +122,7 @@ impl TextureReader {
             let row_bytes = desc.Width as usize * bpp;
             let height = desc.Height as usize;
 
-            // 逐行拷贝到内部 buffer，剥离 RowPitch 末尾填充
+            // 逐行拷贝到 scratch buffer，剥离 RowPitch 末尾填充
             let src = mapped.pData as *const u8;
             for y in 0..height {
                 // SAFETY: src 指向 mapped GPU 内存，row_pitch * y + row_bytes 不超过映射范围；
@@ -136,7 +136,8 @@ impl TextureReader {
 
             self.context.Unmap(staging, 0);
 
-            Ok(&self.buffer[..row_bytes * height])
+            // 交付所有权：从 scratch buffer 拷贝一份返回
+            Ok(self.buffer[..row_bytes * height].to_vec())
         }
     }
 }

@@ -1,21 +1,6 @@
 // 集成测试：通过 Pipeline API 截图
 
 use hdrcapture::pipeline::CapturePipeline;
-use image::{ImageBuffer, Rgba};
-
-fn save_bgra8_png(data: &[u8], width: u32, height: u32, path: &str) {
-    let mut img = ImageBuffer::new(width, height);
-    for y in 0..height {
-        for x in 0..width {
-            let i = ((y * width + x) * 4) as usize;
-            let (b, g, r, a) = (data[i], data[i + 1], data[i + 2], data[i + 3]);
-            img.put_pixel(x, y, Rgba([r, g, b, a]));
-        }
-    }
-    img.save(path)
-        .unwrap_or_else(|e| panic!("Failed to save {}: {}", path, e));
-    println!("Saved: {} ({}x{})", path, width, height);
-}
 
 #[test]
 fn test_pipeline_monitor_capture() {
@@ -37,12 +22,9 @@ fn test_pipeline_monitor_capture() {
         frame.height,
         frame.data.len()
     );
-    save_bgra8_png(
-        frame.data,
-        frame.width,
-        frame.height,
-        "tests/results/pipeline_monitor_0.png",
-    );
+    frame
+        .save("tests/results/pipeline_monitor_0.png")
+        .expect("Failed to save");
 }
 
 #[test]
@@ -63,8 +45,5 @@ fn test_pipeline_consecutive_frames() {
             frame.height,
             frame.data.len()
         );
-
-        // 短暂等待，让 DWM 推新帧
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
