@@ -64,7 +64,7 @@ HDR_CAP/
 │   └── results/                  # 测试截图输出（gitignored）
 │
 └── docs/
-    └── dev/
+    └── dev/                      # 开发文档（gitignored，不纳入版本控制）
         ├── plan_v2.md            # 高层设计（V2 简化路线）
         ├── STEP_BY_STEP_PLAN_V2.md # 分步骤执行计划（V2）
         └── ...                   # 其他调研/设计文档
