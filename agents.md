@@ -40,86 +40,60 @@
 ```
 HDR_CAP/
 ├── Cargo.toml                    # Rust 依赖配置
-├── pyproject.toml                # Python 包配置（maturin）
-├── build.rs                      # 构建脚本（编译 HLSL）
+├── pyproject.toml                # Python 包配置（maturin）— 待创建
 ├── .gitignore
 ├── README.md
 ├── LICENSE
 ├── agents.md                     # 本文档
 │
 ├── src/
-│   ├── lib.rs                    # 库入口 + PyO3 模块定义
+│   ├── lib.rs                    # 库入口（模块声明）
+│   ├── d3d11.rs                  # D3D11Context, create_d3d11_device
 │   ├── d3d11/
-│   │   ├── mod.rs                # D3D11 设备创建与管理
-│   │   └── texture.rs            # 纹理创建、回读工具
+│   │   └── texture.rs            # TextureReader（单缓冲、行剥离、buffer 复用）
+│   ├── capture.rs                # 模块入口（re-export target + wgc）
 │   ├── capture/
-│   │   ├── mod.rs                # 捕获引擎入口
-│   │   └── wgc.rs                # WGC 实现
-│   ├── tonemap/
-│   │   ├── mod.rs                # 色调映射管线
-│   │   ├── shader.rs             # Compute Shader 管理
-│   │   └── white_level.rs        # SDR White Level 查询
-│   ├── pipeline.rs               # 完整处理管线
-│   └── python.rs                 # PyO3 Python 绑定
-│
-├── shaders/
-│   └── tonemap.hlsl              # HLSL Compute Shader
+│   │   ├── target.rs             # find_monitor, find_window, enable_dpi_awareness
+│   │   └── wgc.rs                # WGCCapture, init_capture, CaptureTarget（固定 BGRA8）
+│   ├── pipeline.rs               # 完整处理管线（待实现）
+│   └── python.rs                 # PyO3 Python 绑定（待实现）
 │
 ├── tests/
-│   └── integration_test.rs
-│
-├── examples/
-│   ├── capture_test.rs           # Rust 示例
-│   └── python_example.py         # Python 示例
+│   ├── test_monitor_capture.rs   # 集成测试：按索引捕获显示器
+│   ├── test_window_capture.rs    # 集成测试：按进程名捕获窗口
+│   └── results/                  # 测试截图输出（gitignored）
 │
 └── docs/
-    ├── dev/
-    │   ├── plan.md               # 开发计划（高层设计）
-    │   ├── HDR_INVESTIGATION.md  # 技术调研报告
-    │   └── STEP_BY_STEP_PLAN.md  # 分步骤执行计划（21 步）
-    └── API.md                    # Python API 文档
+    └── dev/
+        ├── plan_v2.md            # 高层设计（V2 简化路线）
+        ├── STEP_BY_STEP_PLAN_V2.md # 分步骤执行计划（V2）
+        └── ...                   # 其他调研/设计文档
 ```
 
 ---
 
-## 开发阶段（P0-P3）
+## 开发阶段（P0-P1）
 
-### P0：环境准备与基础捕获 ✅ 当前阶段
-- **目标**：成功捕获首帧 `R16G16B16A16_FLOAT` 格式的 HDR 纹理
-- **关键步骤**：
-  - 初始化 Rust 项目（Cargo.toml 配置）
-  - 配置 `windows-rs` features
-  - 创建 D3D11 设备
-  - 实现 WGC 捕获管线
-  - 实现纹理 CPU 回读
-- **验证标准**：保存首帧图像（可能仍泛白，属正常）
+### P0：捕获引擎 ✅
+- **目标**：统一使用 BGRA8 格式捕获，DWM 自动处理 HDR→SDR
+- **已完成**：
+  - D3D11 设备创建、WGC 捕获管线
+  - 目标解析（显示器索引枚举、窗口 PID 预过滤查找）
+  - 纹理 CPU 回读（行剥离、buffer 复用）
+  - 简化管线（移除 HDR 检测，固定 BGRA8）
+  - HDR 环境截图质量验证
+- **验证标准**：HDR 环境下截图不泛白，色彩自然 ✅
 
-### P1：GPU 色调映射算法实现
-- **目标**：实现 HDR→SDR 色彩转换，输出正确色彩的 8-bit 图像
-- **关键步骤**：
-  - 研究 OBS 色调映射算法
-  - 编写 HLSL Compute Shader
-  - 实现 Shader 编译与调度
-  - 完整 GPU 管线（16-bit 输入 → 8-bit 输出）
-- **验证标准**：与 PixPin 截图对比，PSNR > 30dB
-
-### P2：动态 SDR White Level 校准
-- **目标**：自动适配不同亮度设置和多显示器环境
-- **关键步骤**：
-  - 调用 Windows API 获取 SDR White Level
-  - 动态注入着色器参数
-  - 多显示器支持
-- **验证标准**：修改系统 HDR 亮度后截图自动适应
-
-### P3：性能优化与 Python 封装
+### P1：性能优化与 Python 封装 ⬅️ 当前阶段
 - **目标**：4K 延迟 < 10ms，生成可 pip install 的 .pyd 模块
 - **关键步骤**：
-  - GPU-CPU 异步回读（双缓冲）
-  - 性能基准测试
-  - PyO3 + rust-numpy 封装
-  - Python API 设计（HDRCapture 类）
-  - maturin 构建与打包
-- **验证标准**：Python 中 `import hdr_cap` 并成功截图
+  - Step 1.0 — Pipeline API（高层管线接口）⬅️ 下一步
+  - Step 1.1 — GPU-CPU 回读优化 ✅
+  - Step 1.2 — 性能基准测试
+  - Step 1.3 — PyO3 基础封装
+  - Step 1.4 — Python API 设计
+  - Step 1.5 — 构建打包
+- **验证标准**：Python 中 `import hdr_cap` 并成功截图，4K 延迟 < 10ms
 
 ---
 
@@ -238,8 +212,8 @@ Closes #1
 |---|---|
 | `windows-rs` 编译错误 | 检查 features 是否完整，参考 Step 0.2 |
 | WGC 初始化失败 | 确认 Windows 版本 ≥ 10 1903，检查 D3D11 设备是否创建成功 |
-| 捕获的图像全黑 | 检查纹理格式是否为 `R16G16B16A16Float`，检查 CopyResource 是否执行 |
-| 色调映射后仍泛白 | 检查 SDR White Level 是否正确获取，检查着色器逻辑 |
+| 捕获的图像全黑 | 检查纹理格式是否为 `B8G8R8A8_UNORM`，检查 CopyResource 是否执行 |
+| 色调映射后仍泛白 | 已简化：DWM 自动处理 HDR→SDR，无需自定义色调映射 |
 | PyO3 编译错误 | 确认 Python 版本 ≥ 3.9，检查 `pyproject.toml` 配置 |
 
 ---
@@ -264,21 +238,24 @@ Closes #1
 
 ## 当前状态
 
-**阶段**：P0 - 环境准备与基础捕获  
-**下一步**：Step 0.1 - 初始化 Rust 项目  
+**阶段**：P1 - 性能优化与 Python 封装  
+**下一步**：Step 1.0 - Pipeline API  
 **已完成**：
-- ✅ 项目调研（HDR_INVESTIGATION.md）
-- ✅ 开发计划（plan.md）
-- ✅ 分步骤计划（STEP_BY_STEP_PLAN.md）
-- ✅ 基础设施（.gitignore, agents.md）
+- ✅ P0 捕获引擎（Step 0.1 ~ 0.9）
+  - D3D11 设备创建、WGC 捕获（固定 BGRA8）、DPI 感知
+  - 目标解析（显示器索引枚举、窗口 PID 预过滤查找）
+  - 纹理回读（行剥离、buffer 复用）
+  - HDR 环境截图质量验证
+- ✅ Step 1.1 GPU-CPU 回读优化（Staging 缓存、RowPitch 剥离、buffer 复用）
 
 **待办事项**：
-- [ ] 创建 README.md
-- [ ] 创建 LICENSE
-- [ ] 初始化 Cargo 项目
-- [ ] 配置 windows-rs 依赖
+- [ ] Step 1.0 — Pipeline API（高层管线接口）
+- [ ] Step 1.2 — 性能基准测试
+- [ ] Step 1.3 — PyO3 基础封装
+- [ ] Step 1.4 — Python API 设计
+- [ ] Step 1.5 — 构建打包
 
 ---
 
-> **最后更新**：2025-02-09  
-> **文档版本**：v1.0
+> **最后更新**：2026-02-11  
+> **文档版本**：v2.0
