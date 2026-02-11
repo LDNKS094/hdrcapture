@@ -72,6 +72,9 @@ pub struct CapturePipeline {
     /// - `true`（默认）：排空积压帧后等待 DWM 推送新帧，适合截图场景。
     /// - `false`：排空后直接取最后一帧，适合高频连续取帧场景。
     pub fresh: bool,
+    /// 首次调用标记。StartCapture() 后的首帧天然是 fresh 的，
+    /// 无需 drain-discard，直接取即可省 ~1 VSync。
+    first_call: bool,
 }
 
 impl CapturePipeline {
@@ -95,20 +98,22 @@ impl CapturePipeline {
 
     fn new(target: CaptureTarget) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
-        let reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
         let capture = init_capture(&d3d_ctx, target)?;
         capture.start()?;
+        // start() 之后再创建 reader，让 DWM 尽早开始准备首帧
+        let reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
             capture,
             reader,
             fresh: true,
+            first_call: true,
         })
     }
 
     /// 轮询等待下一帧（带超时）
-    fn wait_for_frame(
+    fn wait_frame(
         &self,
         deadline: Instant,
     ) -> Result<windows::Graphics::Capture::Direct3D11CaptureFrame> {
@@ -126,18 +131,48 @@ impl CapturePipeline {
         }
     }
 
+    /// 从 WGC 帧中提取纹理并回读像素数据
+    fn read_frame(
+        &mut self,
+        frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+    ) -> Result<CapturedFrame> {
+        let texture = WGCCapture::frame_to_texture(frame)?;
+
+        let (width, height) = unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut desc);
+            (desc.Width, desc.Height)
+        };
+
+        let data = self.reader.read_texture(&texture)?;
+        Ok(CapturedFrame {
+            data,
+            width,
+            height,
+        })
+    }
+
     /// 捕获一帧，返回 BGRA8 像素数据及尺寸
     ///
     /// 行为取决于 `fresh` 字段：
     /// - `true`：排空积压帧 → 等待全新帧，保证帧是调用之后产生的（多等 ~1 VSync）。
     /// - `false`：排空积压帧 → 取最后一帧，延迟更低但可能拿到稍早的帧。
     ///
+    /// 首次调用时跳过排空逻辑，因为 StartCapture() 后的首帧天然是 fresh 的。
+    ///
     /// Frame 生命周期覆盖 CopyResource，确保数据安全。
     /// 返回的 `CapturedFrame` 拥有数据所有权，可自由传递到其他线程。
     pub fn capture_frame(&mut self) -> Result<CapturedFrame> {
         let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
 
-        // 排空积压帧，fresh 模式丢弃所有，非 fresh 模式保留最后一帧
+        // 首次调用：StartCapture() 后的首帧天然是 fresh 的，直接取即可
+        if self.first_call {
+            self.first_call = false;
+            let frame = self.wait_frame(deadline)?;
+            return self.read_frame(&frame);
+        }
+
+        // 后续调用：排空积压帧，fresh 模式丢弃所有，非 fresh 模式保留最后一帧
         let mut latest = None;
         while let Ok(f) = self.capture.try_get_next_frame() {
             if !self.fresh {
@@ -148,25 +183,10 @@ impl CapturePipeline {
         // 取帧：fresh 模式或池空时等待新帧，否则用排空拿到的最后一帧
         let frame = match latest {
             Some(f) => f,
-            None => self.wait_for_frame(deadline)?,
+            None => self.wait_frame(deadline)?,
         };
 
-        let texture = WGCCapture::frame_to_texture(&frame)?;
-
-        let (width, height) = unsafe {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            texture.GetDesc(&mut desc);
-            (desc.Width, desc.Height)
-        };
-
-        // CopyResource + Map → Vec<u8>（frame 仍然存活，surface 安全）
-        let data = self.reader.read_texture(&texture)?;
-
-        // frame 在此处 drop，buffer 归还给 FramePool
-        Ok(CapturedFrame {
-            data,
-            width,
-            height,
-        })
+        // frame 在 read_frame 返回后 drop，buffer 归还给 FramePool
+        self.read_frame(&frame)
     }
 }
