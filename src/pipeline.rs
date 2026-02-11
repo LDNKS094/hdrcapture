@@ -6,12 +6,12 @@
 // Frame 生命周期覆盖 CopyResource，确保 DWM 不会覆盖正在读取的 surface。
 
 use std::path::Path;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use image::{ImageBuffer, Rgba};
 use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 use crate::capture::wgc::{CaptureTarget, WGCCapture};
 use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_capture};
@@ -98,7 +98,11 @@ impl CapturePipeline {
         let capture = init_capture(&d3d_ctx, target)?;
         capture.start()?;
         // start() 之后再创建 reader，让 DWM 尽早开始准备首帧
-        let reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
+        let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
+
+        // 预创建 Staging Texture，避免首次 read_frame 的 ~11ms 创建开销
+        let (w, h) = capture.target_size();
+        reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
@@ -108,7 +112,7 @@ impl CapturePipeline {
         })
     }
 
-    /// 轮询等待下一帧（带超时）
+    /// 等待下一帧（带超时），使用内核事件唤醒
     fn wait_frame(
         &self,
         deadline: Instant,
@@ -117,13 +121,16 @@ impl CapturePipeline {
             if let Ok(f) = self.capture.try_get_next_frame() {
                 return Ok(f);
             }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 bail!(
                     "Timeout waiting for capture frame ({}ms)",
                     FIRST_FRAME_TIMEOUT.as_millis()
                 );
             }
-            thread::sleep(Duration::from_millis(1));
+            // 内核级等待，不消耗 CPU，唤醒延迟 ~0ms
+            let timeout_ms = remaining.as_millis().min(u32::MAX as u128) as u32;
+            self.capture.wait_for_frame(timeout_ms)?;
         }
     }
 

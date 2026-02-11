@@ -41,7 +41,7 @@ impl TextureReader {
     }
 
     /// 确保 Staging Texture 存在且尺寸/格式匹配
-    fn ensure_staging_texture(
+    pub fn ensure_staging_texture(
         &mut self,
         width: u32,
         height: u32,

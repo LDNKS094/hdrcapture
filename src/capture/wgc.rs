@@ -1,17 +1,20 @@
 // Windows Graphics Capture 核心实现
 //
 // 统一使用 BGRA8 格式捕获，DWM 自动处理 HDR→SDR 色调映射。
+// 使用 FrameArrived 事件 + WaitForSingleObject 实现零延迟帧等待。
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use windows::core::Interface;
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
@@ -40,6 +43,11 @@ pub struct WGCCapture {
     _item: GraphicsCaptureItem,
     frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    /// FrameArrived 信号事件（内核对象，WaitForSingleObject 用）
+    frame_event: HANDLE,
+    /// 捕获目标初始尺寸（用于预创建 Staging Texture）
+    target_width: u32,
+    target_height: u32,
 }
 
 impl WGCCapture {
@@ -47,6 +55,11 @@ impl WGCCapture {
     pub fn start(&self) -> Result<()> {
         self.session.StartCapture()?;
         Ok(())
+    }
+
+    /// 捕获目标的初始尺寸
+    pub fn target_size(&self) -> (u32, u32) {
+        (self.target_width, self.target_height)
     }
 
     /// 尝试从 FramePool 取出一帧（非阻塞）
@@ -57,6 +70,24 @@ impl WGCCapture {
         self.frame_pool
             .TryGetNextFrame()
             .context("TryGetNextFrame failed")
+    }
+
+    /// 等待下一帧到达（阻塞，带超时）
+    ///
+    /// 使用内核事件等待，不消耗 CPU，唤醒延迟 ~0ms。
+    /// 返回后调用 `try_get_next_frame()` 获取帧。
+    pub fn wait_for_frame(&self, timeout_ms: u32) -> Result<()> {
+        // SAFETY: frame_event 在 init_capture 中创建，生命周期覆盖整个 WGCCapture
+        let result = unsafe { WaitForSingleObject(self.frame_event, timeout_ms) };
+        if result.0 != 0 {
+            // WAIT_TIMEOUT = 0x102, WAIT_FAILED = 0xFFFFFFFF
+            bail!(
+                "WaitForSingleObject returned 0x{:X} (timeout: {}ms)",
+                result.0,
+                timeout_ms
+            );
+        }
+        Ok(())
     }
 
     /// 从 `Direct3D11CaptureFrame` 中提取 `ID3D11Texture2D`
@@ -75,6 +106,17 @@ impl WGCCapture {
         };
 
         Ok(texture)
+    }
+}
+
+impl Drop for WGCCapture {
+    fn drop(&mut self) {
+        if !self.frame_event.is_invalid() {
+            // SAFETY: frame_event 是我们创建的有效句柄，只关闭一次
+            unsafe {
+                let _ = CloseHandle(self.frame_event);
+            }
+        }
     }
 }
 
@@ -116,6 +158,7 @@ fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
 /// 初始化 WGC 捕获会话
 ///
 /// 统一使用 BGRA8 格式，DWM 自动处理 HDR→SDR 色调映射。
+/// 注册 FrameArrived 事件回调，通过内核事件实现零延迟帧等待。
 ///
 /// # Arguments
 /// * `d3d_ctx` - D3D11 设备上下文
@@ -137,6 +180,25 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
         size,
     )?;
 
+    // 3. 创建内核事件（自动复位，初始无信号）
+    // SAFETY: CreateEventW 创建匿名事件对象
+    let frame_event =
+        unsafe { CreateEventW(None, false, false, None).context("Failed to create frame event")? };
+
+    // 4. 注册 FrameArrived 回调：仅 SetEvent，不做任何 D3D 操作
+    // 将 HANDLE 转为 usize 传入闭包，绕过 Send 限制。
+    // SAFETY: 内核事件句柄是线程安全的，可从任意线程 SetEvent。
+    let event_ptr = frame_event.0 as usize;
+    frame_pool.FrameArrived(&TypedEventHandler::<
+        Direct3D11CaptureFramePool,
+        windows::core::IInspectable,
+    >::new(move |_, _| {
+        unsafe {
+            let _ = SetEvent(HANDLE(event_ptr as *mut _));
+        }
+        Ok(())
+    }))?;
+
     let session = frame_pool.CreateCaptureSession(&item)?;
     session.SetIsBorderRequired(false)?;
 
@@ -144,5 +206,8 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
         _item: item,
         frame_pool,
         session,
+        frame_event,
+        target_width: size.Width as u32,
+        target_height: size.Height as u32,
     })
 }
