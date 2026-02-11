@@ -9,4 +9,4 @@
 
 pub mod capture;
 pub mod d3d11;
-pub(crate) mod pipeline;
+pub mod pipeline;

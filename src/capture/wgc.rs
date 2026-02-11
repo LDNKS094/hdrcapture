@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+    Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -49,9 +49,20 @@ impl WGCCapture {
         Ok(())
     }
 
-    /// 捕获一帧并返回 ID3D11Texture2D
-    pub fn capture_frame(&self) -> Result<ID3D11Texture2D> {
-        let frame = self.frame_pool.TryGetNextFrame()?;
+    /// 尝试从 FramePool 取出一帧（非阻塞）
+    ///
+    /// 返回原始 `Direct3D11CaptureFrame`，调用方控制其生命周期。
+    /// 必须在 frame 被 drop 之前完成对底层 surface 的访问（如 CopyResource）。
+    pub fn try_get_next_frame(&self) -> Result<Direct3D11CaptureFrame> {
+        self.frame_pool
+            .TryGetNextFrame()
+            .context("TryGetNextFrame failed")
+    }
+
+    /// 从 `Direct3D11CaptureFrame` 中提取 `ID3D11Texture2D`
+    ///
+    /// frame 必须在返回的 texture 被使用完毕后才能 drop。
+    pub fn frame_to_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D> {
         let surface: IDirect3DSurface = frame.Surface()?;
         let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
 
@@ -64,6 +75,16 @@ impl WGCCapture {
         };
 
         Ok(texture)
+    }
+
+    /// 捕获一帧并返回 ID3D11Texture2D
+    ///
+    /// 注意：此方法在返回前会 drop Frame 对象，归还 buffer 给 FramePool。
+    /// 调用方应尽快使用返回的 texture（如 CopyResource），避免 DWM 覆盖 surface。
+    /// 推荐使用 `CapturePipeline` 替代，它能正确管理 Frame 生命周期。
+    pub fn capture_frame(&self) -> Result<ID3D11Texture2D> {
+        let frame = self.try_get_next_frame()?;
+        Self::frame_to_texture(&frame)
     }
 }
 
