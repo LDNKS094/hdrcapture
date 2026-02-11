@@ -4,7 +4,20 @@ use anyhow::{Context, Result};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
+/// 根据 DXGI_FORMAT 返回每像素字节数
+fn bytes_per_pixel(format: DXGI_FORMAT) -> usize {
+    match format {
+        DXGI_FORMAT_R16G16B16A16_FLOAT => 8, // 4 × f16
+        DXGI_FORMAT_B8G8R8A8_UNORM => 4,     // 4 × u8
+        DXGI_FORMAT_R8G8B8A8_UNORM => 4,     // 4 × u8
+        _ => panic!("Unsupported DXGI_FORMAT: {:?}", format),
+    }
+}
+
 /// 纹理读取器：负责将 GPU 纹理数据回读到 CPU
+///
+/// Staging texture 按需创建并缓存复用，尺寸/格式变化时自动重建。
+/// 返回的 buffer 已剥离 RowPitch 填充，可直接按 `width * bpp` 索引。
 pub struct TextureReader {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -15,7 +28,6 @@ pub struct TextureReader {
 }
 
 impl TextureReader {
-    /// 创建新的纹理读取器
     pub fn new(device: ID3D11Device, context: ID3D11DeviceContext) -> Self {
         Self {
             device,
@@ -75,46 +87,46 @@ impl TextureReader {
 
     /// 从 GPU 纹理读取数据到 CPU
     ///
-    /// 自动匹配源纹理的格式创建 staging texture
+    /// 返回的 buffer 已剥离 RowPitch 填充，每行恰好 `width * bytes_per_pixel` 字节。
     pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             source_texture.GetDesc(&mut desc);
         }
 
-        // 1. 准备 Staging Texture（格式自动匹配源纹理）
+        let bpp = bytes_per_pixel(desc.Format);
+
         self.ensure_staging_texture(desc.Width, desc.Height, desc.Format)?;
         let staging = self.staging_texture.as_ref().unwrap();
 
         unsafe {
-            // 2. 将数据从源纹理拷贝到 Staging 纹理
-            // CopyResource 适用于整个资源的拷贝，源和目标必须尺寸格式一致
+            // GPU → Staging 拷贝
             self.context.CopyResource(staging, source_texture);
 
-            // 3. 映射内存供 CPU 读取
+            // 映射内存供 CPU 读取
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .context("Failed to map staging texture")?;
 
-            // 4. 读取数据
-            // 计算数据大小：宽 * 高 * 8字节 (16bit * 4 channel)
-            let row_pitch = mapped.RowPitch as usize; // 每行字节数（包含填充）
-            let data_size = (desc.Height * row_pitch as u32) as usize;
+            let row_pitch = mapped.RowPitch as usize; // GPU 实际行宽（含对齐填充）
+            let row_bytes = desc.Width as usize * bpp; // 有效像素数据行宽
+            let height = desc.Height as usize;
 
-            let mut buffer = Vec::with_capacity(data_size);
+            // 逐行拷贝，剥离 RowPitch 末尾填充
+            let mut buffer = vec![0u8; row_bytes * height];
+            let src = mapped.pData as *const u8;
 
-            // 注意：直接从 mapped.pData 拷贝
-            // 这里的实现简单粗暴，直接把整块内存（包含每行末尾可能的填充）都拷贝了
-            // 在 Python 端处理时需要注意 RowPitch
-            std::ptr::copy_nonoverlapping(
-                mapped.pData as *const u8,
-                buffer.as_mut_ptr(),
-                data_size,
-            );
-            buffer.set_len(data_size);
+            for y in 0..height {
+                // SAFETY: src 指向 mapped GPU 内存，row_pitch * y + row_bytes 不超过映射范围；
+                //         buffer 已分配 row_bytes * height 字节。
+                std::ptr::copy_nonoverlapping(
+                    src.add(y * row_pitch),
+                    buffer.as_mut_ptr().add(y * row_bytes),
+                    row_bytes,
+                );
+            }
 
-            // 5. 解除映射
             self.context.Unmap(staging, 0);
 
             Ok(buffer)
@@ -128,11 +140,20 @@ mod tests {
     use crate::d3d11::create_d3d11_device;
 
     #[test]
-    fn test_texture_readback_logic() {
+    fn test_texture_readback_row_stripped() {
         let d3d_ctx = create_d3d11_device().unwrap();
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-        // 1. 创建一个 2x2 的源纹理 (Default Usage)
+        // 2x2 R16G16B16A16_FLOAT，全红像素
+        // f16: 1.0 = 0x3C00, 0.0 = 0x0000
+        let pixel_red: [u16; 4] = [0x3C00, 0x0000, 0x0000, 0x3C00];
+        let mut init_data = Vec::new();
+        for _ in 0..4 {
+            init_data.extend_from_slice(&pixel_red);
+        }
+
+        let init_bytes: Vec<u8> = init_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+
         let desc = D3D11_TEXTURE2D_DESC {
             Width: 2,
             Height: 2,
@@ -149,22 +170,9 @@ mod tests {
             MiscFlags: 0,
         };
 
-        // 2. 准备初始化数据
-        // 每个像素 4 个 f16 (RGBA)，2x2 共 4 个像素
-        // 假设全红：(1.0, 0.0, 0.0, 1.0)
-        // f16::from_f32(1.0) -> 0x3C00
-        // f16::from_f32(0.0) -> 0x0000
-        let pixel_red: [u16; 4] = [0x3C00, 0x0000, 0x0000, 0x3C00];
-        let mut init_data = Vec::new();
-        for _ in 0..4 {
-            init_data.extend_from_slice(&pixel_red); // 4 个像素
-        }
-
-        // 重要：创建 Initialize Data 描述
-        // SysMemPitch: 每行字节数 = 2 像素 * 8 字节 = 16
         let subresource_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: init_data.as_ptr() as *const _,
-            SysMemPitch: 16,
+            pSysMem: init_bytes.as_ptr() as *const _,
+            SysMemPitch: 16, // 2 pixels × 8 bytes
             SysMemSlicePitch: 0,
         };
 
@@ -176,13 +184,10 @@ mod tests {
                 .unwrap();
             let texture = texture.unwrap();
 
-            // 3. 读取数据
             let data = reader.read_texture(&texture).unwrap();
 
-            // 4. 验证
-            // 注意：data 可能包含 RowPitch 填充，所以不能直接比较 Vec
-            // 2x2 纹理通常太小，显卡可能会按 256 字节对齐
-            println!("Readback data size: {}", data.len());
+            // 剥离填充后，数据大小应恰好 = 2 × 2 × 8 = 32 字节
+            assert_eq!(data.len(), 32, "Stripped buffer should be exactly 32 bytes");
 
             // 验证第一个像素
             let u16_data = std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2);
@@ -190,6 +195,10 @@ mod tests {
             assert_eq!(u16_data[1], 0x0000); // G
             assert_eq!(u16_data[2], 0x0000); // B
             assert_eq!(u16_data[3], 0x3C00); // A
+
+            // 验证第二行第一个像素（offset = row_bytes = 16 bytes = 8 u16）
+            assert_eq!(u16_data[8], 0x3C00); // R
+            assert_eq!(u16_data[9], 0x0000); // G
         }
     }
 }
