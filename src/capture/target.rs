@@ -1,13 +1,19 @@
-// 捕获目标解析：监视器索引 → HMONITOR，窗口类名/标题 → HWND
+// 捕获目标解析：监视器索引 → HMONITOR，进程名 + 索引 → HWND
 
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+};
 
 // ---------------------------------------------------------------------------
 // DPI
@@ -82,39 +88,113 @@ unsafe extern "system" fn enum_monitor_proc(
 // 窗口查找
 // ---------------------------------------------------------------------------
 
-/// 按类名和/或标题查找窗口
+/// 按进程名查找窗口
 ///
-/// 至少需要提供 `class` 或 `title` 之一。
-/// 返回第一个匹配的窗口句柄。
-pub fn find_window(class: Option<&str>, title: Option<&str>) -> Result<HWND> {
-    if class.is_none() && title.is_none() {
-        bail!("Must specify at least one of class or title");
+/// 枚举所有属于指定进程的可见顶层窗口，按 `index` 选择。
+/// `index` 默认为 0（第一个匹配的窗口）。
+///
+/// # Examples
+/// ```no_run
+/// # use hdrcapture::capture::find_window;
+/// let hwnd = find_window("notepad.exe", None).unwrap();       // 第一个 notepad 窗口
+/// let hwnd = find_window("notepad.exe", Some(1)).unwrap();    // 第二个
+/// ```
+pub fn find_window(process_name: &str, index: Option<usize>) -> Result<HWND> {
+    let index = index.unwrap_or(0);
+
+    // 阶段 1：通过进程快照收集目标 PID 集合
+    let pids = get_pids_by_name(process_name)?;
+    if pids.is_empty() {
+        bail!("No running process found for \"{}\"", process_name);
     }
+
+    // 阶段 2：枚举窗口，用 PID 集合快速过滤
+    let windows = enumerate_windows_by_pids(&pids);
+    if windows.is_empty() {
+        bail!("No visible windows found for process \"{}\"", process_name);
+    }
+
+    windows.get(index).copied().with_context(|| {
+        format!(
+            "Window index {} out of range for \"{}\" (found {})",
+            index,
+            process_name,
+            windows.len()
+        )
+    })
+}
+
+// --- 阶段 1：PID 采集 ---
+
+/// 通过进程快照获取所有匹配进程名的 PID
+fn get_pids_by_name(process_name: &str) -> Result<HashSet<u32>> {
+    let target = process_name.to_lowercase();
+    let mut pids = HashSet::new();
 
     unsafe {
-        let class_wide: Vec<u16>;
-        let class_ptr = match class {
-            Some(s) => {
-                class_wide = s.encode_utf16().chain(std::iter::once(0)).collect();
-                windows::core::PCWSTR(class_wide.as_ptr())
-            }
-            None => windows::core::PCWSTR::null(),
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            .context("CreateToolhelp32Snapshot failed")?;
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
         };
 
-        let title_wide: Vec<u16>;
-        let title_ptr = match title {
-            Some(s) => {
-                title_wide = s.encode_utf16().chain(std::iter::once(0)).collect();
-                windows::core::PCWSTR(title_wide.as_ptr())
-            }
-            None => windows::core::PCWSTR::null(),
-        };
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let name = String::from_utf16_lossy(&entry.szExeFile)
+                    .trim_end_matches('\0')
+                    .to_lowercase();
 
-        FindWindowW(class_ptr, title_ptr).context(format!(
-            "Window not found (class={:?}, title={:?})",
-            class, title
-        ))
+                if name == target {
+                    pids.insert(entry.th32ProcessID);
+                }
+
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
     }
+
+    Ok(pids)
+}
+
+// --- 阶段 2：窗口匹配 ---
+
+fn enumerate_windows_by_pids(pids: &HashSet<u32>) -> Vec<HWND> {
+    unsafe {
+        let mut ctx = EnumCtx {
+            pids,
+            results: Vec::new(),
+        };
+
+        let _ = EnumWindows(Some(enum_window_proc), LPARAM(&mut ctx as *mut _ as isize));
+
+        ctx.results
+    }
+}
+
+struct EnumCtx<'a> {
+    pids: &'a HashSet<u32>,
+    results: Vec<HWND>,
+}
+
+unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut EnumCtx);
+
+    if !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+
+    if pid != 0 && ctx.pids.contains(&pid) {
+        ctx.results.push(hwnd);
+    }
+
+    BOOL(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -140,13 +220,14 @@ mod tests {
 
     #[test]
     fn test_find_window_not_found() {
-        let result = find_window(Some("NonExistentClass_12345"), None);
+        let result = find_window("nonexistent_process_12345.exe", None);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_find_window_requires_param() {
-        let result = find_window(None, None);
+    fn test_find_window_index_out_of_range() {
+        // explorer.exe 通常存在，但不会有 999 个窗口
+        let result = find_window("explorer.exe", Some(999));
         assert!(result.is_err());
     }
 }

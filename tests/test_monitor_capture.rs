@@ -58,7 +58,7 @@ fn capture_monitor(index: usize) {
         (desc.Width, desc.Height)
     };
 
-    save_bgra8_png(data, w, h, &format!("test_monitor_{}.png", index));
+    save_bgra8_png(data, w, h, &format!("tests/results/monitor_{}.png", index));
 }
 
 #[test]
