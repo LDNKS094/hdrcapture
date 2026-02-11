@@ -11,6 +11,7 @@ pub struct TextureReader {
     staging_texture: Option<ID3D11Texture2D>,
     width: u32,
     height: u32,
+    format: DXGI_FORMAT,
 }
 
 impl TextureReader {
@@ -22,12 +23,22 @@ impl TextureReader {
             staging_texture: None,
             width: 0,
             height: 0,
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
         }
     }
 
-    /// 确保 Staging Texture 存在且尺寸匹配
-    fn ensure_staging_texture(&mut self, width: u32, height: u32) -> Result<()> {
-        if self.staging_texture.is_some() && self.width == width && self.height == height {
+    /// 确保 Staging Texture 存在且尺寸/格式匹配
+    fn ensure_staging_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: DXGI_FORMAT,
+    ) -> Result<()> {
+        if self.staging_texture.is_some()
+            && self.width == width
+            && self.height == height
+            && self.format == format
+        {
             return Ok(());
         }
 
@@ -36,7 +47,7 @@ impl TextureReader {
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -56,6 +67,7 @@ impl TextureReader {
             self.staging_texture = Some(texture.unwrap());
             self.width = width;
             self.height = height;
+            self.format = format;
         }
 
         Ok(())
@@ -63,15 +75,15 @@ impl TextureReader {
 
     /// 从 GPU 纹理读取数据到 CPU
     ///
-    /// 返回的数据是 R16G16B16A16_FLOAT 格式的字节流
+    /// 自动匹配源纹理的格式创建 staging texture
     pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             source_texture.GetDesc(&mut desc);
         }
 
-        // 1. 准备 Staging Texture
-        self.ensure_staging_texture(desc.Width, desc.Height)?;
+        // 1. 准备 Staging Texture（格式自动匹配源纹理）
+        self.ensure_staging_texture(desc.Width, desc.Height, desc.Format)?;
         let staging = self.staging_texture.as_ref().unwrap();
 
         unsafe {
