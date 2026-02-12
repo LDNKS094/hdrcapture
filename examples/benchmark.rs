@@ -28,7 +28,7 @@ const WARMUP_FRAMES: usize = 10;
 const STREAMING_FRAMES: usize = 100;
 
 /// 目标窗口进程名（不存在则跳过）
-const WINDOW_PROCESS: &str = "Endfield.exe";
+const WINDOW_PROCESS: &str = "notepad.exe";
 
 // ---------------------------------------------------------------------------
 // 统计工具

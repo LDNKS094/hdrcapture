@@ -11,7 +11,7 @@ use hdrcapture::pipeline::CapturePipeline;
 // ---------------------------------------------------------------------------
 
 /// 目标进程名（如 "notepad.exe"、"chrome.exe"）
-const TARGET_PROCESS: &str = "Endfield.exe";
+const TARGET_PROCESS: &str = "notepad.exe";
 
 /// 窗口索引（同一进程有多个窗口时，0 = 第一个）
 const TARGET_INDEX: usize = 0;
