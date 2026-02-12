@@ -22,8 +22,6 @@ def main():
     frame = timed("cold start", lambda: hdrcapture.screenshot())
     print(f"  {repr(frame)}")
     timed("save png", lambda: frame.save("tests/results/test_screenshot.png"))
-    timed("save bmp", lambda: frame.save("tests/results/test_screenshot.bmp"))
-    timed("save jpg", lambda: frame.save("tests/results/test_screenshot.jpg"))
 
     # 2. numpy 转换
     print("\n[2] numpy 转换")

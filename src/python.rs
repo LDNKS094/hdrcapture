@@ -14,6 +14,22 @@ use pyo3::prelude::*;
 
 use crate::pipeline;
 
+/// 释放 GIL 执行纯 Rust 闭包，完成后重新获取 GIL。
+///
+/// 与 `py.detach()` 相同，但绕过 `Ungil` (Send) 约束。
+/// 安全前提：闭包在当前线程执行，不跨线程传递捕获的引用。
+/// 本项目中 `CapturePipeline` 包含 Win32 HANDLE 和 COM 指针（非 Send），
+/// 但 `Capture` 已标记 `unsendable`，保证只在创建线程上使用。
+fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> T {
+    // SAFETY: SuspendAttach 释放 GIL 并在 drop 时重新获取。
+    // 闭包在同一线程上同步执行，不跨线程传递非 Send 类型。
+    let _guard = unsafe { pyo3::ffi::PyEval_SaveThread() };
+    let result = f();
+    unsafe { pyo3::ffi::PyEval_RestoreThread(_guard) };
+    let _ = py;
+    result
+}
+
 // ---------------------------------------------------------------------------
 // CapturedFrame — 帧容器
 // ---------------------------------------------------------------------------
@@ -50,9 +66,11 @@ impl CapturedFrame {
     /// 保存为图片文件（格式由扩展名决定，如 .png、.bmp、.jpg）
     ///
     /// Rust 侧直接执行 BGRA→RGBA 转换并写盘，不经过 Python 内存。
-    fn save(&self, path: &str) -> PyResult<()> {
-        self.inner
-            .save(path)
+    /// 编码期间释放 GIL，不阻塞其他 Python 线程。
+    fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let inner = &self.inner;
+        let path = path.to_string();
+        detach_gil(py, || inner.save(&path))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -156,10 +174,10 @@ impl Capture {
     /// 截图模式：捕获一帧全新的画面
     ///
     /// 排空积压帧后等待 DWM 推送新帧，保证返回的帧是调用之后产生的。
-    fn capture(&mut self) -> PyResult<CapturedFrame> {
+    /// 等待和回读期间释放 GIL，不阻塞其他 Python 线程。
+    fn capture(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
-        let frame = p
-            .capture()
+        let frame = detach_gil(py, || p.capture())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(CapturedFrame { inner: frame })
     }
@@ -167,10 +185,10 @@ impl Capture {
     /// 连续取帧模式：抓取最新可用帧
     ///
     /// 排空积压帧保留最后一帧，池空时等待新帧。延迟更低。
-    fn grab(&mut self) -> PyResult<CapturedFrame> {
+    /// 等待和回读期间释放 GIL，不阻塞其他 Python 线程。
+    fn grab(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
-        let frame = p
-            .grab()
+        let frame = detach_gil(py, || p.grab())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(CapturedFrame { inner: frame })
     }
@@ -219,8 +237,8 @@ impl Capture {
 ///     CapturedFrame: 帧容器，可 save() 或转 numpy
 #[pyfunction]
 #[pyo3(signature = (monitor=0))]
-fn screenshot(monitor: usize) -> PyResult<CapturedFrame> {
-    let frame = pipeline::screenshot(monitor)
+fn screenshot(py: Python<'_>, monitor: usize) -> PyResult<CapturedFrame> {
+    let frame = detach_gil(py, || pipeline::screenshot(monitor))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(CapturedFrame { inner: frame })
 }
