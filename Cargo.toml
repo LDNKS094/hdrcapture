@@ -8,7 +8,7 @@ license = "MIT"
 repository = ""
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 name = "hdrcapture"
 
 [dependencies]
@@ -38,6 +38,8 @@ windows = { version = "0.62", features = [
 ] }
 anyhow = "1.0"
 image = "0.25"
+pyo3 = "0.28.0"
+numpy = "0.28.0"
 
 [profile.release]
 opt-level = 3

@@ -29,6 +29,8 @@ pub struct CapturedFrame {
     pub width: u32,
     /// 帧高度（像素）
     pub height: u32,
+    /// 帧时间戳（秒），相对于系统启动时间（QPC）
+    pub timestamp: f64,
 }
 
 impl CapturedFrame {
@@ -139,6 +141,9 @@ impl CapturePipeline {
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
     ) -> Result<CapturedFrame> {
+        // 提取时间戳（SystemRelativeTime，100ns 精度，转换为秒）
+        let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
+
         let texture = WGCCapture::frame_to_texture(frame)?;
 
         let (width, height) = unsafe {
@@ -152,6 +157,7 @@ impl CapturePipeline {
             data,
             width,
             height,
+            timestamp,
         })
     }
 

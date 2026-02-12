@@ -8,3 +8,4 @@
 pub mod capture;
 pub mod d3d11;
 pub mod pipeline;
+mod python;
