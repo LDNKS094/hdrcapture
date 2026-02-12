@@ -12,7 +12,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::time::Instant;
 
-use hdrcapture::pipeline::CapturePipeline;
+use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -87,10 +87,11 @@ enum Target {
 
 fn create_pipeline(target: &Target) -> Option<CapturePipeline> {
     match target {
-        Target::Monitor(idx) => {
-            Some(CapturePipeline::monitor(*idx).expect("Failed to create monitor pipeline"))
-        }
-        Target::Window(name) => CapturePipeline::window(name, Some(0)).ok(),
+        Target::Monitor(idx) => Some(
+            CapturePipeline::monitor(*idx, CapturePolicy::Auto)
+                .expect("Failed to create monitor pipeline"),
+        ),
+        Target::Window(name) => CapturePipeline::window(name, Some(0), CapturePolicy::Auto).ok(),
     }
 }
 

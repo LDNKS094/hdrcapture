@@ -42,12 +42,16 @@ class Capture:
     """
 
     @staticmethod
-    def monitor(index: int = 0) -> "Capture":
+    def monitor(index: int = 0, force_sdr: bool = False) -> "Capture":
         """Create a capture pipeline for a monitor by index."""
         ...
 
     @staticmethod
-    def window(process_name: str, index: int | None = None) -> "Capture":
+    def window(
+        process_name: str,
+        index: int | None = None,
+        force_sdr: bool = False,
+    ) -> "Capture":
         """Create a capture pipeline for a window by process name."""
         ...
 
@@ -71,6 +75,7 @@ def screenshot(
     monitor: int = 0,
     window: str | None = None,
     window_index: int | None = None,
+    force_sdr: bool = False,
 ) -> CapturedFrame:
     """One-shot capture of the specified monitor or window.
 

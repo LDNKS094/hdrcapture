@@ -1,10 +1,11 @@
 // Integration test: Screenshot via Pipeline API
 
-use hdrcapture::pipeline::CapturePipeline;
+use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 
 #[test]
 fn test_pipeline_monitor_capture() {
-    let mut pipeline = CapturePipeline::monitor(0).expect("Failed to create pipeline");
+    let mut pipeline =
+        CapturePipeline::monitor(0, CapturePolicy::Auto).expect("Failed to create pipeline");
 
     let frame = pipeline.capture().expect("Failed to capture frame");
 
@@ -29,7 +30,8 @@ fn test_pipeline_monitor_capture() {
 
 #[test]
 fn test_pipeline_consecutive_frames() {
-    let mut pipeline = CapturePipeline::monitor(0).expect("Failed to create pipeline");
+    let mut pipeline =
+        CapturePipeline::monitor(0, CapturePolicy::Auto).expect("Failed to create pipeline");
 
     // Consecutively capture 3 frames, verify drain strategy and buffer reuse
     for i in 0..3 {

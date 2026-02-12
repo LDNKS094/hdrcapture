@@ -19,6 +19,36 @@ use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_captu
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
 
+/// Capture policy.
+///
+/// `Auto` is reserved for HDR-aware path selection.
+/// `ForceSdr` keeps the current BGRA8-compatible path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapturePolicy {
+    #[default]
+    Auto,
+    ForceSdr,
+}
+
+impl From<bool> for CapturePolicy {
+    fn from(force_sdr: bool) -> Self {
+        if force_sdr {
+            Self::ForceSdr
+        } else {
+            Self::Auto
+        }
+    }
+}
+
+/// One-shot capture source (high-level input before OS handle resolution).
+pub enum CaptureSource<'a> {
+    Monitor(usize),
+    Window {
+        process_name: &'a str,
+        window_index: Option<usize>,
+    },
+}
+
 /// First frame wait timeout
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -62,13 +92,14 @@ impl CapturedFrame {
 ///
 /// # Examples
 /// ```no_run
-/// # use hdrcapture::pipeline::CapturePipeline;
-/// let mut pipeline = CapturePipeline::monitor(0).unwrap();
+/// # use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
+/// let mut pipeline = CapturePipeline::monitor(0, CapturePolicy::Auto).unwrap();
 /// let frame = pipeline.capture().unwrap();
 /// println!("{}x{}, {} bytes", frame.width, frame.height, frame.data.len());
 /// ```
 pub struct CapturePipeline {
     _d3d_ctx: D3D11Context,
+    _policy: CapturePolicy,
     capture: WGCCapture,
     reader: TextureReader,
     /// First call flag. First frame after StartCapture() is naturally fresh,
@@ -83,22 +114,22 @@ impl CapturePipeline {
     /// Create capture pipeline by monitor index
     ///
     /// Indices are ordered by system enumeration, not guaranteed that `0` is the primary monitor.
-    pub fn monitor(index: usize) -> Result<Self> {
+    pub fn monitor(index: usize, policy: CapturePolicy) -> Result<Self> {
         enable_dpi_awareness();
         let hmonitor = find_monitor(index)?;
-        Self::new(CaptureTarget::Monitor(hmonitor))
+        Self::new(CaptureTarget::Monitor(hmonitor), policy)
     }
 
     /// Create window capture pipeline by process name
     ///
     /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
-    pub fn window(process_name: &str, index: Option<usize>) -> Result<Self> {
+    pub fn window(process_name: &str, index: Option<usize>, policy: CapturePolicy) -> Result<Self> {
         enable_dpi_awareness();
         let hwnd = find_window(process_name, index)?;
-        Self::new(CaptureTarget::Window(hwnd))
+        Self::new(CaptureTarget::Window(hwnd), policy)
     }
 
-    fn new(target: CaptureTarget) -> Result<Self> {
+    fn new(target: CaptureTarget, policy: CapturePolicy) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
         let capture = init_capture(&d3d_ctx, target)?;
         capture.start()?;
@@ -111,6 +142,7 @@ impl CapturePipeline {
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
+            _policy: policy,
             capture,
             reader,
             first_call: true,
@@ -293,21 +325,13 @@ impl CapturePipeline {
 /// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
 ///
 /// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
-pub fn screenshot(monitor_index: usize) -> Result<CapturedFrame> {
-    let mut pipeline = CapturePipeline::monitor(monitor_index)?;
-    pipeline.capture()
-}
-
-/// One-liner window screenshot: create pipeline → capture frame → return
-///
-/// Captures the first matching top-level window of `process_name`.
-/// Use `window_index` to select the Nth matching window when multiple exist.
-///
-/// Suitable for scenarios where only one screenshot is needed. Internally creates and destroys pipeline,
-/// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
-///
-/// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
-pub fn screenshot_window(process_name: &str, window_index: Option<usize>) -> Result<CapturedFrame> {
-    let mut pipeline = CapturePipeline::window(process_name, window_index)?;
+pub fn screenshot(source: CaptureSource<'_>, policy: CapturePolicy) -> Result<CapturedFrame> {
+    let mut pipeline = match source {
+        CaptureSource::Monitor(index) => CapturePipeline::monitor(index, policy)?,
+        CaptureSource::Window {
+            process_name,
+            window_index,
+        } => CapturePipeline::window(process_name, window_index, policy)?,
+    };
     pipeline.capture()
 }

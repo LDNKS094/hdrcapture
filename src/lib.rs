@@ -10,13 +10,14 @@
 //!
 //! ```no_run
 //! use hdrcapture::pipeline;
+//! use hdrcapture::pipeline::{CapturePolicy, CaptureSource};
 //!
 //! // One-shot screenshot
-//! let frame = pipeline::screenshot(0).unwrap();
+//! let frame = pipeline::screenshot(CaptureSource::Monitor(0), CapturePolicy::Auto).unwrap();
 //! frame.save("screenshot.png").unwrap();
 //!
 //! // Reusable pipeline
-//! let mut cap = pipeline::CapturePipeline::monitor(0).unwrap();
+//! let mut cap = pipeline::CapturePipeline::monitor(0, CapturePolicy::Auto).unwrap();
 //! let frame = cap.capture().unwrap();
 //! println!("{}x{}", frame.width, frame.height);
 //! ```

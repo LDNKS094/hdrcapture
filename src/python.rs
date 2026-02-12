@@ -158,10 +158,12 @@ impl Capture {
     ///
     /// Args:
     ///     index: Monitor index, defaults to 0
+    ///     force_sdr: Force SDR-compatible capture path
     #[staticmethod]
-    #[pyo3(signature = (index=0))]
-    fn monitor(index: usize) -> PyResult<Self> {
-        let pipeline = pipeline::CapturePipeline::monitor(index)
+    #[pyo3(signature = (index=0, force_sdr=false))]
+    fn monitor(index: usize, force_sdr: bool) -> PyResult<Self> {
+        let policy = pipeline::CapturePolicy::from(force_sdr);
+        let pipeline = pipeline::CapturePipeline::monitor(index, policy)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             pipeline: Some(pipeline),
@@ -173,10 +175,12 @@ impl Capture {
     /// Args:
     ///     process_name: Process name (e.g., "notepad.exe")
     ///     index: Window index for processes with the same name, defaults to 0
+    ///     force_sdr: Force SDR-compatible capture path
     #[staticmethod]
-    #[pyo3(signature = (process_name, index=None))]
-    fn window(process_name: &str, index: Option<usize>) -> PyResult<Self> {
-        let pipeline = pipeline::CapturePipeline::window(process_name, index)
+    #[pyo3(signature = (process_name, index=None, force_sdr=false))]
+    fn window(process_name: &str, index: Option<usize>, force_sdr: bool) -> PyResult<Self> {
+        let policy = pipeline::CapturePolicy::from(force_sdr);
+        let pipeline = pipeline::CapturePipeline::window(process_name, index, policy)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             pipeline: Some(pipeline),
@@ -246,20 +250,29 @@ impl Capture {
 ///     monitor: Monitor index, defaults to 0
 ///     window: Process name for window capture (e.g., "notepad.exe")
 ///     window_index: Window index for processes with the same name, defaults to 0
+///     force_sdr: Force SDR-compatible capture path
 ///
 /// Returns:
 ///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
-#[pyo3(signature = (monitor=0, window=None, window_index=None))]
+#[pyo3(signature = (monitor=0, window=None, window_index=None, force_sdr=false))]
 fn screenshot(
     py: Python<'_>,
     monitor: usize,
     window: Option<&str>,
     window_index: Option<usize>,
+    force_sdr: bool,
 ) -> PyResult<CapturedFrame> {
+    let policy = pipeline::CapturePolicy::from(force_sdr);
     let frame = detach_gil(py, || match window {
-        Some(process_name) => pipeline::screenshot_window(process_name, window_index),
-        None => pipeline::screenshot(monitor),
+        Some(process_name) => pipeline::screenshot(
+            pipeline::CaptureSource::Window {
+                process_name,
+                window_index,
+            },
+            policy,
+        ),
+        None => pipeline::screenshot(pipeline::CaptureSource::Monitor(monitor), policy),
     })?
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(CapturedFrame { inner: frame })

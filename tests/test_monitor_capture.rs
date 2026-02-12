@@ -1,10 +1,10 @@
 // Integration test: Capture each monitor by index
 
 use hdrcapture::capture::find_monitor;
-use hdrcapture::pipeline::CapturePipeline;
+use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 
 fn capture_monitor(index: usize) {
-    let mut pipeline = CapturePipeline::monitor(index).unwrap();
+    let mut pipeline = CapturePipeline::monitor(index, CapturePolicy::Auto).unwrap();
     let frame = pipeline.capture().unwrap();
 
     assert!(frame.width > 0 && frame.height > 0);
