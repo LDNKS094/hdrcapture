@@ -76,6 +76,11 @@ Window capture:
 ```python
 import hdrcapture
 
+# One-shot window screenshot
+frame = hdrcapture.screenshot(window="notepad.exe")
+frame.save("notepad.png")
+
+# Or reusable pipeline for repeated captures
 with hdrcapture.Capture.window("notepad.exe") as cap:
     frame = cap.capture()
     frame.save("notepad.png")
@@ -85,9 +90,10 @@ with hdrcapture.Capture.window("notepad.exe") as cap:
 
 ### Module-level
 
-#### `screenshot(monitor=0) -> CapturedFrame`
+#### `screenshot(monitor=0, window=None, window_index=None) -> CapturedFrame`
 
-One-shot capture. Creates and destroys a pipeline internally (~70ms cold start). Use `Capture` class for repeated captures.
+One-shot capture. If `window` is provided, captures that process window (with optional `window_index`); otherwise captures `monitor`.
+Creates and destroys a pipeline internally (~70ms cold start). Use `Capture` class for repeated captures.
 
 ### `CapturedFrame`
 

@@ -67,10 +67,16 @@ class Capture:
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool: ...
     def __repr__(self) -> str: ...
 
-def screenshot(monitor: int = 0) -> CapturedFrame:
-    """One-shot capture of the specified monitor.
+def screenshot(
+    monitor: int = 0,
+    window: str | None = None,
+    window_index: int | None = None,
+) -> CapturedFrame:
+    """One-shot capture of the specified monitor or window.
 
     Creates and destroys a pipeline internally (~70ms cold start).
     Use Capture class for repeated captures.
+
+    If `window` is provided, window capture is used and `monitor` is ignored.
     """
     ...

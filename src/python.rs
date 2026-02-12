@@ -237,21 +237,31 @@ impl Capture {
 // Module-level functions
 // ---------------------------------------------------------------------------
 
-/// One-liner screenshot: capture current frame of specified monitor
+/// One-liner screenshot: capture monitor or window
 ///
 /// Internally creates and destroys pipeline, cold start ~79ms.
 /// For multiple screenshots, use Capture class to reuse the pipeline.
 ///
 /// Args:
 ///     monitor: Monitor index, defaults to 0
+///     window: Process name for window capture (e.g., "notepad.exe")
+///     window_index: Window index for processes with the same name, defaults to 0
 ///
 /// Returns:
 ///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
-#[pyo3(signature = (monitor=0))]
-fn screenshot(py: Python<'_>, monitor: usize) -> PyResult<CapturedFrame> {
-    let frame = detach_gil(py, || pipeline::screenshot(monitor))?
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+#[pyo3(signature = (monitor=0, window=None, window_index=None))]
+fn screenshot(
+    py: Python<'_>,
+    monitor: usize,
+    window: Option<&str>,
+    window_index: Option<usize>,
+) -> PyResult<CapturedFrame> {
+    let frame = detach_gil(py, || match window {
+        Some(process_name) => pipeline::screenshot_window(process_name, window_index),
+        None => pipeline::screenshot(monitor),
+    })?
+    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(CapturedFrame { inner: frame })
 }
 

@@ -297,3 +297,17 @@ pub fn screenshot(monitor_index: usize) -> Result<CapturedFrame> {
     let mut pipeline = CapturePipeline::monitor(monitor_index)?;
     pipeline.capture()
 }
+
+/// One-liner window screenshot: create pipeline → capture frame → return
+///
+/// Captures the first matching top-level window of `process_name`.
+/// Use `window_index` to select the Nth matching window when multiple exist.
+///
+/// Suitable for scenarios where only one screenshot is needed. Internally creates and destroys pipeline,
+/// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
+///
+/// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
+pub fn screenshot_window(process_name: &str, window_index: Option<usize>) -> Result<CapturedFrame> {
+    let mut pipeline = CapturePipeline::window(process_name, window_index)?;
+    pipeline.capture()
+}

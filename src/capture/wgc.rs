@@ -4,6 +4,8 @@
 // Uses FrameArrived event + WaitForSingleObject for zero-latency frame waiting.
 
 use anyhow::{bail, Context, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use windows::core::Interface;
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
@@ -43,8 +45,12 @@ pub struct WGCCapture {
     _item: GraphicsCaptureItem,
     frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    /// FrameArrived callback token (for unregistering on drop)
+    frame_arrived_token: i64,
     /// FrameArrived signal event (kernel object, for WaitForSingleObject)
     frame_event: HANDLE,
+    /// Indicates teardown has started (callback should stop signaling)
+    shutting_down: Arc<AtomicBool>,
     /// Initial size of capture target (for pre-creating Staging Texture)
     target_width: u32,
     target_height: u32,
@@ -109,6 +115,10 @@ impl WGCCapture {
 
 impl Drop for WGCCapture {
     fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
+
+        let _ = self.frame_pool.RemoveFrameArrived(self.frame_arrived_token);
+
         if !self.frame_event.is_invalid() {
             // SAFETY: frame_event is a valid handle we created, only close once
             unsafe {
@@ -186,14 +196,18 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
     // 4. Register FrameArrived callback: only SetEvent, no D3D operations
     // Convert HANDLE to usize for closure, bypassing Send restriction.
     // SAFETY: Kernel event handles are thread-safe, SetEvent can be called from any thread.
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let shutting_down_cb = Arc::clone(&shutting_down);
     let event_ptr = frame_event.0 as usize;
-    frame_pool.FrameArrived(&TypedEventHandler::<
+    let frame_arrived_token = frame_pool.FrameArrived(&TypedEventHandler::<
         Direct3D11CaptureFramePool,
         windows::core::IInspectable,
     >::new(move |_, _| {
-        unsafe {
-            if SetEvent(HANDLE(event_ptr as *mut _)).is_err() {
-                eprintln!("hdrcapture: SetEvent failed in FrameArrived callback");
+        if !shutting_down_cb.load(Ordering::Relaxed) {
+            unsafe {
+                if SetEvent(HANDLE(event_ptr as *mut _)).is_err() {
+                    eprintln!("hdrcapture: SetEvent failed in FrameArrived callback");
+                }
             }
         }
         Ok(())
@@ -206,7 +220,9 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
         _item: item,
         frame_pool,
         session,
+        frame_arrived_token,
         frame_event,
+        shutting_down,
         target_width: size.Width as u32,
         target_height: size.Height as u32,
     })
