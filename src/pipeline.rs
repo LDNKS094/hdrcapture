@@ -8,8 +8,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
-use image::{ImageBuffer, Rgba};
+use anyhow::{bail, Context, Result};
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ExtendedColorType, ImageEncoder, ImageFormat};
 use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
@@ -36,23 +38,65 @@ pub struct CapturedFrame {
 impl CapturedFrame {
     /// 保存为图片文件（格式由扩展名决定，如 .png、.bmp、.jpg）
     ///
-    /// 内部执行 BGRA → RGBA 通道转换。
+    /// PNG 使用快速压缩（牺牲文件大小换速度）。
+    /// JPEG 自动去除 alpha 通道（BGRA→RGB）。
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let mut img = ImageBuffer::new(self.width, self.height);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let i = ((y * self.width + x) * 4) as usize;
-                let (b, g, r, a) = (
-                    self.data[i],
-                    self.data[i + 1],
-                    self.data[i + 2],
-                    self.data[i + 3],
-                );
-                img.put_pixel(x, y, Rgba([r, g, b, a]));
+        let path = path.as_ref();
+        let format = ImageFormat::from_path(path)
+            .context("Cannot determine image format from file extension")?;
+
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+
+        match format {
+            ImageFormat::Png => {
+                // 快速压缩：CompressionType::Fast + FilterType::Sub
+                let encoder =
+                    PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
+                let rgba = self.bgra_to_rgba();
+                encoder.write_image(&rgba, self.width, self.height, ExtendedColorType::Rgba8)?;
+            }
+            ImageFormat::Jpeg => {
+                // JPEG 不支持 alpha，转为 RGB
+                let rgb = self.bgra_to_rgb();
+                let encoder = JpegEncoder::new_with_quality(writer, 95);
+                encoder.write_image(&rgb, self.width, self.height, ExtendedColorType::Rgb8)?;
+            }
+            _ => {
+                // BMP 等其他格式：BGRA→RGBA 后用通用路径
+                let rgba = self.bgra_to_rgba();
+                image::save_buffer(
+                    path,
+                    &rgba,
+                    self.width,
+                    self.height,
+                    ExtendedColorType::Rgba8,
+                )?;
             }
         }
-        img.save(path.as_ref())?;
+
         Ok(())
+    }
+
+    /// BGRA → RGBA 通道交换
+    fn bgra_to_rgba(&self) -> Vec<u8> {
+        let mut rgba = self.data.clone();
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        rgba
+    }
+
+    /// BGRA → RGB（去除 alpha 通道）
+    fn bgra_to_rgb(&self) -> Vec<u8> {
+        let pixel_count = (self.width * self.height) as usize;
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for pixel in self.data.chunks_exact(4) {
+            rgb.push(pixel[2]); // R
+            rgb.push(pixel[1]); // G
+            rgb.push(pixel[0]); // B
+        }
+        rgb
     }
 }
 
