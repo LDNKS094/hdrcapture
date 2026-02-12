@@ -1,4 +1,4 @@
-// D3D11 设备创建与管理
+// D3D11 device creation and management
 
 pub mod texture;
 
@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 
-/// D3D11 设备上下文
+/// D3D11 device context
 pub struct D3D11Context {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
@@ -19,7 +19,7 @@ pub struct D3D11Context {
     pub direct3d_device: IDirect3DDevice,
 }
 
-/// 创建 D3D11 设备
+/// Create D3D11 device
 pub fn create_d3d11_device() -> anyhow::Result<D3D11Context> {
     let (device, context) = unsafe {
         let mut device = None;

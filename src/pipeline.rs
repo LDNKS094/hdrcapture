@@ -1,9 +1,9 @@
-// 捕获管线：target 解析 → WGC 初始化 → 帧捕获 → 纹理回读
+// Capture pipeline: target resolution → WGC initialization → frame capture → texture readback
 //
-// 提供两种取帧模式：
-// - capture()：排空积压帧后等全新帧，适合截图（保证帧是调用之后产生的）
-// - grab()：排空积压帧取最后一帧，适合连续取帧（延迟更低）
-// Frame 生命周期覆盖 CopyResource，确保 DWM 不会覆盖正在读取的 surface。
+// Provides two frame retrieval modes:
+// - capture(): drain backlog and wait for fresh frame, suitable for screenshots (guarantees frame is generated after call)
+// - grab(): drain backlog and take last frame, suitable for continuous capture (lower latency)
+// Frame lifetime covers CopyResource, ensuring DWM won't overwrite the surface being read.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -19,27 +19,27 @@ use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_captu
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
 
-/// 首帧等待超时时间
+/// First frame wait timeout
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// 等待新帧的短超时（~3 VSyncs at 60Hz）
-/// 屏幕活跃时新帧在 1 VSync 内到达；超时说明屏幕静止，应使用 fallback。
+/// Short timeout for waiting for new frame (~3 VSyncs at 60Hz)
+/// When screen is active, new frame arrives within 1 VSync; timeout indicates static screen, fallback should be used.
 const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// 一帧捕获结果
+/// Single frame capture result
 pub struct CapturedFrame {
-    /// BGRA8 像素数据，长度 = width * height * 4
+    /// BGRA8 pixel data, length = width * height * 4
     pub data: Vec<u8>,
-    /// 帧宽度（像素）
+    /// Frame width (pixels)
     pub width: u32,
-    /// 帧高度（像素）
+    /// Frame height (pixels)
     pub height: u32,
-    /// 帧时间戳（秒），相对于系统启动时间（QPC）
+    /// Frame timestamp (seconds), relative to system boot time (QPC)
     pub timestamp: f64,
 }
 
 impl CapturedFrame {
-    /// 保存为 PNG 文件（快速压缩）
+    /// Save as PNG file (fast compression)
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let file = std::fs::File::create(path.as_ref())?;
         let writer = std::io::BufWriter::new(file);
@@ -56,9 +56,9 @@ impl CapturedFrame {
     }
 }
 
-/// 捕获管线
+/// Capture pipeline
 ///
-/// 封装 D3D11 设备、WGC 捕获会话、纹理回读器，提供一行代码截图的能力。
+/// Wraps D3D11 device, WGC capture session, and texture reader, providing one-liner screenshot capability.
 ///
 /// # Examples
 /// ```no_run
@@ -71,8 +71,8 @@ pub struct CapturePipeline {
     _d3d_ctx: D3D11Context,
     capture: WGCCapture,
     reader: TextureReader,
-    /// 首次调用标记。StartCapture() 后的首帧天然是 fresh 的，
-    /// 无需 drain-discard，直接取即可省 ~1 VSync。
+    /// First call flag. First frame after StartCapture() is naturally fresh,
+    /// no drain-discard needed, direct capture saves ~1 VSync.
     first_call: bool,
     /// Timestamp from the last successful read_frame(), for static-screen fallback.
     /// Pixel data and dimensions live in TextureReader (persists across calls).
@@ -80,18 +80,18 @@ pub struct CapturePipeline {
 }
 
 impl CapturePipeline {
-    /// 按显示器索引创建捕获管线
+    /// Create capture pipeline by monitor index
     ///
-    /// 索引按系统枚举顺序排列，不保证 `0` 为主显示器。
+    /// Indices are ordered by system enumeration, not guaranteed that `0` is the primary monitor.
     pub fn monitor(index: usize) -> Result<Self> {
         enable_dpi_awareness();
         let hmonitor = find_monitor(index)?;
         Self::new(CaptureTarget::Monitor(hmonitor))
     }
 
-    /// 按进程名创建窗口捕获管线
+    /// Create window capture pipeline by process name
     ///
-    /// `index` 为同名进程的窗口序号，默认 0（第一个匹配窗口）。
+    /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
     pub fn window(process_name: &str, index: Option<usize>) -> Result<Self> {
         enable_dpi_awareness();
         let hwnd = find_window(process_name, index)?;
@@ -102,10 +102,10 @@ impl CapturePipeline {
         let d3d_ctx = create_d3d11_device()?;
         let capture = init_capture(&d3d_ctx, target)?;
         capture.start()?;
-        // start() 之后再创建 reader，让 DWM 尽早开始准备首帧
+        // Create reader after start() to let DWM start preparing first frame as early as possible
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-        // 预创建 Staging Texture，避免首次 read_frame 的 ~11ms 创建开销
+        // Pre-create Staging Texture to avoid ~11ms creation overhead on first read_frame
         let (w, h) = capture.target_size();
         reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
 
@@ -153,12 +153,12 @@ impl CapturePipeline {
         })
     }
 
-    /// 从 WGC 帧中提取纹理并回读像素数据
+    /// Extract texture from WGC frame and read back pixel data
     fn read_frame(
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
     ) -> Result<CapturedFrame> {
-        // 提取时间戳（SystemRelativeTime，100ns 精度，转换为秒）
+        // Extract timestamp (SystemRelativeTime, 100ns precision, converted to seconds)
         let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
 
         let texture = WGCCapture::frame_to_texture(frame)?;
@@ -202,15 +202,15 @@ impl CapturePipeline {
         })
     }
 
-    /// 截图模式：捕获一帧全新的画面
+    /// Screenshot mode: capture a fresh frame
     ///
-    /// 排空积压帧 → 等待 DWM 推送新帧，保证返回的帧是调用之后产生的。
-    /// 首次调用时跳过排空（首帧天然是 fresh 的）。
-    /// 屏幕静止时使用 fallback 避免长时间阻塞。
+    /// Drain backlog → wait for DWM to push new frame, guarantees returned frame is generated after the call.
+    /// Skip drain on first call (first frame is naturally fresh).
+    /// Use fallback when screen is static to avoid long blocking.
     ///
-    /// 适合截图场景，延迟 ~1 VSync。
+    /// Suitable for screenshot scenarios, latency ~1 VSync.
     pub fn capture(&mut self) -> Result<CapturedFrame> {
-        // 首次调用：StartCapture() 后的首帧天然是 fresh 的，直接取即可
+        // First call: first frame after StartCapture() is naturally fresh, just capture it
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
@@ -245,15 +245,15 @@ impl CapturePipeline {
         self.read_frame(&frame)
     }
 
-    /// 连续取帧模式：抓取最新可用帧
+    /// Continuous capture mode: grab latest available frame
     ///
-    /// 排空积压帧，保留最后一帧；池空时等待新帧。
-    /// 返回的帧可能是调用之前产生的，但延迟更低。
-    /// 屏幕静止时使用 fallback 避免长时间阻塞。
+    /// Drain backlog, keep last frame; wait for new frame when pool is empty.
+    /// Returned frame may have been generated before the call, but with lower latency.
+    /// Use fallback when screen is static to avoid long blocking.
     ///
-    /// 适合高频连续取帧场景。
+    /// Suitable for high-frequency continuous capture scenarios.
     pub fn grab(&mut self) -> Result<CapturedFrame> {
-        // 首次调用：直接取首帧
+        // First call: directly capture first frame
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
@@ -287,12 +287,12 @@ impl CapturePipeline {
     }
 }
 
-/// 一行截图：创建管线 → 捕获一帧 → 返回
+/// One-liner screenshot: create pipeline → capture frame → return
 ///
-/// 适合只需要截一张图的场景。内部创建并销毁 pipeline，
-/// 冷启动 ~79ms（含 D3D11 设备创建 + WGC 会话创建 + 首帧等待）。
+/// Suitable for scenarios where only one screenshot is needed. Internally creates and destroys pipeline,
+/// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
 ///
-/// 如需多次截图，请使用 `CapturePipeline` 复用管线。
+/// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
 pub fn screenshot(monitor_index: usize) -> Result<CapturedFrame> {
     let mut pipeline = CapturePipeline::monitor(monitor_index)?;
     pipeline.capture()

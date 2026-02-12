@@ -1,12 +1,12 @@
-// 性能基准测试：测量 capture() / grab() 延迟
+// Performance benchmark: measure capture() / grab() latency
 //
-// 测试场景：
-// 1. 单帧截图：新建 pipeline → capture()，测端到端延迟
-// 2. 连续取帧：pipeline 热启动后连续取帧，测稳态延迟
+// Test scenarios:
+// 1. Single-shot: new pipeline → capture(), measure end-to-end latency
+// 2. Continuous capture: continuous frames after pipeline warm-up, measure steady-state latency
 //
-// 分别对显示器和窗口执行，结果保存到 tests/results/
+// Execute on both monitor and window, results saved to tests/results/
 //
-// 用法：cargo run --release --example benchmark
+// Usage: cargo run --release --example benchmark
 
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -15,23 +15,23 @@ use std::time::Instant;
 use hdrcapture::pipeline::CapturePipeline;
 
 // ---------------------------------------------------------------------------
-// 配置
+// Configuration
 // ---------------------------------------------------------------------------
 
-/// 单帧截图测试次数
+/// Single-shot test rounds
 const SINGLE_SHOT_ROUNDS: usize = 20;
 
-/// 连续取帧预热帧数
+/// Continuous capture warm-up frames
 const WARMUP_FRAMES: usize = 10;
 
-/// 连续取帧测试帧数
+/// Continuous capture test frames
 const STREAMING_FRAMES: usize = 100;
 
-/// 目标窗口进程名（不存在则跳过）
+/// Target window process name (skipped if not exists)
 const WINDOW_PROCESS: &str = "notepad.exe";
 
 // ---------------------------------------------------------------------------
-// 统计工具
+// Statistics utilities
 // ---------------------------------------------------------------------------
 
 struct Stats {
@@ -77,7 +77,7 @@ fn format_stats(label: &str, resolution: &str, count: usize, stats: &Stats) -> S
 }
 
 // ---------------------------------------------------------------------------
-// 测试场景
+// Test scenarios
 // ---------------------------------------------------------------------------
 
 enum Target {
@@ -101,7 +101,7 @@ fn target_label(target: &Target) -> String {
     }
 }
 
-/// 单帧截图：每次新建 pipeline → capture()，测端到端延迟
+/// Single-shot: new pipeline each time → capture(), measure end-to-end latency
 fn bench_single_shot(target: &Target, report: &mut String) {
     let label = target_label(target);
     let mut durations = Vec::with_capacity(SINGLE_SHOT_ROUNDS);
@@ -119,7 +119,7 @@ fn bench_single_shot(target: &Target, report: &mut String) {
 
         if i == 0 {
             resolution = format!("{}x{}", frame.width, frame.height);
-            // 保存一张截图验证画面
+            // Save a screenshot to verify image
             fs::create_dir_all("tests/results").ok();
             frame
                 .save(format!("tests/results/bench_{}_single.png", label))
@@ -138,7 +138,7 @@ fn bench_single_shot(target: &Target, report: &mut String) {
     write!(report, "{s}").unwrap();
 }
 
-/// 连续取帧：pipeline 热启动后连续取帧
+/// Continuous capture: continuous frames after pipeline warm-up
 fn bench_streaming(target: &Target, use_capture: bool, report: &mut String) {
     let label = target_label(target);
     let mode = if use_capture { "capture" } else { "grab" };
@@ -148,7 +148,7 @@ fn bench_streaming(target: &Target, use_capture: bool, report: &mut String) {
         None => return,
     };
 
-    // 预热
+    // Warm-up
     for _ in 0..WARMUP_FRAMES {
         if use_capture {
             pipeline.capture().unwrap();
@@ -193,7 +193,7 @@ fn bench_streaming(target: &Target, use_capture: bool, report: &mut String) {
 }
 
 // ---------------------------------------------------------------------------
-// 入口
+// Entry point
 // ---------------------------------------------------------------------------
 
 fn main() {
@@ -206,7 +206,7 @@ fn main() {
     for target in &targets {
         let label = target_label(target);
 
-        // 检查目标是否可用
+        // Check if target is available
         if create_pipeline(target).is_none() {
             let msg = format!("SKIPPED: {} not available\n\n", label);
             print!("{msg}");
@@ -225,7 +225,7 @@ fn main() {
         println!();
     }
 
-    // 保存报告
+    // Save report
     fs::create_dir_all("tests/results").ok();
     fs::write("tests/results/benchmark_report.txt", &report).expect("Failed to save report");
     println!("Report saved to tests/results/benchmark_report.txt");

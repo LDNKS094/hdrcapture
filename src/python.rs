@@ -1,11 +1,11 @@
-// PyO3 Python 绑定层
+// PyO3 Python binding layer
 //
-// 两个 PyClass：
-// - CapturedFrame：帧容器，持有像素数据，提供 save() 和 numpy 转换
-// - Capture：可复用管线，包装 CapturePipeline
+// Two PyClasses:
+// - CapturedFrame: frame container, holds pixel data, provides save() and numpy conversion
+// - Capture: reusable pipeline, wraps CapturePipeline
 //
-// Pipeline 保持纯 Rust，不依赖 pyo3/numpy。
-// 本模块负责跨语言桥接和错误映射。
+// Pipeline remains pure Rust, no dependency on pyo3/numpy.
+// This module handles cross-language bridging and error mapping.
 
 use std::panic::AssertUnwindSafe;
 
@@ -44,13 +44,13 @@ fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
 }
 
 // ---------------------------------------------------------------------------
-// CapturedFrame — 帧容器
+// CapturedFrame — frame container
 // ---------------------------------------------------------------------------
 
-/// 一帧捕获结果
+/// Single frame capture result
 ///
-/// 持有 BGRA8 像素数据，提供保存和 numpy 转换功能。
-/// `save()` 在 Rust 侧直接写盘，不经过 Python，性能最优。
+/// Holds BGRA8 pixel data, provides save and numpy conversion functionality.
+/// `save()` writes directly to disk on the Rust side, bypassing Python, for optimal performance.
 #[pyclass]
 struct CapturedFrame {
     inner: pipeline::CapturedFrame,
@@ -58,43 +58,43 @@ struct CapturedFrame {
 
 #[pymethods]
 impl CapturedFrame {
-    /// 帧宽度（像素）
+    /// Frame width (pixels)
     #[getter]
     fn width(&self) -> u32 {
         self.inner.width
     }
 
-    /// 帧高度（像素）
+    /// Frame height (pixels)
     #[getter]
     fn height(&self) -> u32 {
         self.inner.height
     }
 
-    /// 帧时间戳（秒），相对于系统启动时间
+    /// Frame timestamp (seconds), relative to system boot time
     #[getter]
     fn timestamp(&self) -> f64 {
         self.inner.timestamp
     }
 
-    /// 保存为图片文件（格式由扩展名决定，如 .png、.bmp、.jpg）
+    /// Save as image file (format determined by extension, e.g., .png, .bmp, .jpg)
     ///
-    /// Rust 侧直接执行 BGRA→RGBA 转换并写盘，不经过 Python 内存。
-    /// 编码期间释放 GIL，不阻塞其他 Python 线程。
+    /// Rust side directly performs BGRA→RGBA conversion and writes to disk, bypassing Python memory.
+    /// Releases GIL during encoding, doesn't block other Python threads.
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = &self.inner;
         let path = path.to_string();
         detach_gil(py, || inner.save(&path))?.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// 转换为 ndarray
+    /// Convert to ndarray
     ///
     /// Returns:
-    ///     numpy.ndarray: shape (H, W, 4), dtype uint8, BGRA 通道顺序
+    ///     numpy.ndarray: shape (H, W, 4), dtype uint8, BGRA channel order
     fn ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
         self.to_ndarray(py)
     }
 
-    /// numpy __array__ 协议，使 np.array(frame) 自动工作
+    /// numpy __array__ protocol, enables np.array(frame) to work automatically
     #[pyo3(signature = (dtype=None, copy=None))]
     fn __array__<'py>(
         &self,
@@ -115,7 +115,7 @@ impl CapturedFrame {
 }
 
 impl CapturedFrame {
-    /// 内部共用的 numpy 转换逻辑
+    /// Internal shared numpy conversion logic
     fn to_ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
         let h = self.inner.height as usize;
         let w = self.inner.width as usize;
@@ -126,16 +126,16 @@ impl CapturedFrame {
 }
 
 // ---------------------------------------------------------------------------
-// Capture — 可复用管线
+// Capture — reusable pipeline
 // ---------------------------------------------------------------------------
 
-/// 屏幕/窗口捕获管线
+/// Screen/window capture pipeline
 ///
-/// 通过类方法构造：
+/// Construct via class methods:
 ///   cap = Capture.monitor(0)
 ///   cap = Capture.window("notepad.exe")
 ///
-/// 支持 context manager：
+/// Supports context manager:
 ///   with Capture.monitor(0) as cap:
 ///       frame = cap.capture()
 #[pyclass(unsendable)]
@@ -144,7 +144,7 @@ struct Capture {
 }
 
 impl Capture {
-    /// 获取 pipeline 引用，close() 后报错
+    /// Get pipeline reference, errors after close()
     fn get_pipeline(&mut self) -> PyResult<&mut pipeline::CapturePipeline> {
         self.pipeline
             .as_mut()
@@ -154,10 +154,10 @@ impl Capture {
 
 #[pymethods]
 impl Capture {
-    /// 按显示器索引创建捕获管线
+    /// Create capture pipeline by monitor index
     ///
     /// Args:
-    ///     index: 显示器索引，默认 0
+    ///     index: Monitor index, defaults to 0
     #[staticmethod]
     #[pyo3(signature = (index=0))]
     fn monitor(index: usize) -> PyResult<Self> {
@@ -168,11 +168,11 @@ impl Capture {
         })
     }
 
-    /// 按进程名创建窗口捕获管线
+    /// Create window capture pipeline by process name
     ///
     /// Args:
-    ///     process_name: 进程名（如 "notepad.exe"）
-    ///     index: 同名进程的窗口序号，默认 0
+    ///     process_name: Process name (e.g., "notepad.exe")
+    ///     index: Window index for processes with the same name, defaults to 0
     #[staticmethod]
     #[pyo3(signature = (process_name, index=None))]
     fn window(process_name: &str, index: Option<usize>) -> PyResult<Self> {
@@ -183,10 +183,10 @@ impl Capture {
         })
     }
 
-    /// 截图模式：捕获一帧全新的画面
+    /// Screenshot mode: capture a fresh frame
     ///
-    /// 排空积压帧后等待 DWM 推送新帧，保证返回的帧是调用之后产生的。
-    /// 等待和回读期间释放 GIL，不阻塞其他 Python 线程。
+    /// Drain backlog and wait for DWM to push new frame, guarantees returned frame is generated after the call.
+    /// Releases GIL during wait and readback, doesn't block other Python threads.
     fn capture(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
         let frame =
@@ -194,10 +194,10 @@ impl Capture {
         Ok(CapturedFrame { inner: frame })
     }
 
-    /// 连续取帧模式：抓取最新可用帧
+    /// Continuous capture mode: grab latest available frame
     ///
-    /// 排空积压帧保留最后一帧，池空时等待新帧。延迟更低。
-    /// 等待和回读期间释放 GIL，不阻塞其他 Python 线程。
+    /// Drain backlog and keep last frame, wait for new frame when pool is empty. Lower latency.
+    /// Releases GIL during wait and readback, doesn't block other Python threads.
     fn grab(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
         let frame =
@@ -205,7 +205,7 @@ impl Capture {
         Ok(CapturedFrame { inner: frame })
     }
 
-    /// 释放捕获资源
+    /// Release capture resources
     fn close(&mut self) {
         self.pipeline = None;
     }
@@ -221,7 +221,7 @@ impl Capture {
         _exc_tb: Option<Bound<'_, PyAny>>,
     ) -> bool {
         self.close();
-        false // 不吞异常
+        false // Don't swallow exceptions
     }
 
     fn __repr__(&self) -> String {
@@ -234,19 +234,19 @@ impl Capture {
 }
 
 // ---------------------------------------------------------------------------
-// 模块级函数
+// Module-level functions
 // ---------------------------------------------------------------------------
 
-/// 一行截图：捕获指定显示器的当前画面
+/// One-liner screenshot: capture current frame of specified monitor
 ///
-/// 内部创建并销毁 pipeline，冷启动 ~79ms。
-/// 如需多次截图，请使用 Capture 类复用管线。
+/// Internally creates and destroys pipeline, cold start ~79ms.
+/// For multiple screenshots, use Capture class to reuse the pipeline.
 ///
 /// Args:
-///     monitor: 显示器索引，默认 0
+///     monitor: Monitor index, defaults to 0
 ///
 /// Returns:
-///     CapturedFrame: 帧容器，可 save() 或转 numpy
+///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
 #[pyo3(signature = (monitor=0))]
 fn screenshot(py: Python<'_>, monitor: usize) -> PyResult<CapturedFrame> {

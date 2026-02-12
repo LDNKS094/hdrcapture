@@ -1,4 +1,4 @@
-// 集成测试：按索引截取每个监视器
+// Integration test: Capture each monitor by index
 
 use hdrcapture::capture::find_monitor;
 use hdrcapture::pipeline::CapturePipeline;

@@ -1,4 +1,4 @@
-// 捕获目标解析：监视器索引 → HMONITOR，进程名 + 索引 → HWND
+// Capture target resolution: monitor index → HMONITOR, process name + index → HWND
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -19,24 +19,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 // DPI
 // ---------------------------------------------------------------------------
 
-/// 启用 Per-Monitor DPI 感知
+/// Enable Per-Monitor DPI awareness
 ///
-/// 确保捕获的是物理分辨率而非缩放后的逻辑分辨率。
-/// 重复调用安全（已设置过则静默忽略）。
+/// Ensures capturing physical resolution rather than scaled logical resolution.
+/// Repeated calls are safe (silently ignored if already set).
 pub fn enable_dpi_awareness() {
     unsafe {
-        // SAFETY: best-effort 调用，失败说明已被设置过
+        // SAFETY: best-effort call, failure indicates it was already set
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }
 
 // ---------------------------------------------------------------------------
-// 监视器查找
+// Monitor lookup
 // ---------------------------------------------------------------------------
 
-/// 按索引查找监视器
+/// Find monitor by index
 ///
-/// 索引按系统枚举顺序排列，不保证 `0` 为主显示器。
+/// Indices are ordered by system enumeration order, not guaranteed that `0` is the primary monitor.
 pub fn find_monitor(index: usize) -> Result<HMONITOR> {
     let monitors = enumerate_monitors()?;
 
@@ -53,7 +53,7 @@ pub fn find_monitor(index: usize) -> Result<HMONITOR> {
     })
 }
 
-// --- 内部枚举 ---
+// --- Internal enumeration ---
 
 fn enumerate_monitors() -> Result<Vec<HMONITOR>> {
     unsafe {
@@ -88,30 +88,30 @@ unsafe extern "system" fn enum_monitor_proc(
 }
 
 // ---------------------------------------------------------------------------
-// 窗口查找
+// Window lookup
 // ---------------------------------------------------------------------------
 
-/// 按进程名查找窗口
+/// Find window by process name
 ///
-/// 枚举所有属于指定进程的可见顶层窗口，按 `index` 选择。
-/// `index` 默认为 0（第一个匹配的窗口）。
+/// Enumerates all visible top-level windows belonging to the specified process, selecting by `index`.
+/// `index` defaults to 0 (first matching window).
 ///
 /// # Examples
 /// ```no_run
 /// # use hdrcapture::capture::find_window;
-/// let hwnd = find_window("notepad.exe", None).unwrap();       // 第一个 notepad 窗口
-/// let hwnd = find_window("notepad.exe", Some(1)).unwrap();    // 第二个
+/// let hwnd = find_window("notepad.exe", None).unwrap();       // first notepad window
+/// let hwnd = find_window("notepad.exe", Some(1)).unwrap();    // second
 /// ```
 pub fn find_window(process_name: &str, index: Option<usize>) -> Result<HWND> {
     let index = index.unwrap_or(0);
 
-    // 阶段 1：通过进程快照收集目标 PID 集合
+    // Phase 1: Collect target PIDs via process snapshot
     let pids = get_pids_by_name(process_name)?;
     if pids.is_empty() {
         bail!("No running process found for \"{}\"", process_name);
     }
 
-    // 阶段 2：枚举窗口，用 PID 集合快速过滤
+    // Phase 2: Enumerate windows, filter quickly using PID set
     let windows = enumerate_windows_by_pids(&pids);
     if windows.is_empty() {
         bail!("No visible windows found for process \"{}\"", process_name);
@@ -127,9 +127,9 @@ pub fn find_window(process_name: &str, index: Option<usize>) -> Result<HWND> {
     })
 }
 
-// --- 阶段 1：PID 采集 ---
+// --- Phase 1: PID collection ---
 
-/// 通过进程快照获取所有匹配进程名的 PID
+/// Get all PIDs matching the process name via process snapshot
 fn get_pids_by_name(process_name: &str) -> Result<HashSet<u32>> {
     let target = process_name.to_lowercase();
     let mut pids = HashSet::new();
@@ -176,7 +176,7 @@ fn get_pids_by_name(process_name: &str) -> Result<HashSet<u32>> {
     Ok(pids)
 }
 
-// --- 阶段 2：窗口匹配 ---
+// --- Phase 2: Window matching ---
 
 fn enumerate_windows_by_pids(pids: &HashSet<u32>) -> Vec<HWND> {
     unsafe {
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_find_window_index_out_of_range() {
-        // explorer.exe 通常存在，但不会有 999 个窗口
+        // explorer.exe usually exists, but won't have 999 windows
         let result = find_window("explorer.exe", Some(999));
         assert!(result.is_err());
     }

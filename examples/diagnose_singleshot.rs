@@ -1,14 +1,14 @@
-// 诊断工具：分段计时 single-shot 各阶段耗时
+// Diagnostic tool: measure single-shot per-phase timing
 //
-// 每轮从零开始，精确测量：
-//   1. find_monitor — 目标解析
-//   2. create_d3d11_device — D3D11 设备创建
-//   3. init_capture — WGC 会话创建
-//   4. start — 启动捕获
-//   5. wait — 等待首帧
-//   6. read — 纹理回读
+// Starts from zero each round, precisely measuring:
+//   1. find_monitor — target resolution
+//   2. create_d3d11_device — D3D11 device creation
+//   3. init_capture — WGC session creation
+//   4. start — start capture
+//   5. wait — wait for first frame
+//   6. read — texture readback
 //
-// 用法：cargo run --release --example diagnose_singleshot
+// Usage: cargo run --release --example diagnose_singleshot
 
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -95,10 +95,10 @@ fn main() {
         });
     }
 
-    // --- 统计 ---
+    // --- Statistics ---
     let mut report = String::from("=== Single-Shot Diagnosis ===\n\n");
 
-    // 逐轮明细
+    // Per-round details
     writeln!(report, "per-round detail ({} rounds):", ROUNDS).unwrap();
     writeln!(
         report,
@@ -116,7 +116,7 @@ fn main() {
     }
     writeln!(report).unwrap();
 
-    // 各阶段 p50
+    // Per-phase p50
     macro_rules! p50 {
         ($field:ident) => {{
             let mut v: Vec<f64> = timings.iter().map(|t| t.$field).collect();

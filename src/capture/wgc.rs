@@ -1,7 +1,7 @@
-// Windows Graphics Capture 核心实现
+// Windows Graphics Capture core implementation
 //
-// 统一使用 BGRA8 格式捕获，DWM 自动处理 HDR→SDR 色调映射。
-// 使用 FrameArrived 事件 + WaitForSingleObject 实现零延迟帧等待。
+// Uniformly uses BGRA8 format for capture, DWM automatically handles HDR→SDR tone mapping.
+// Uses FrameArrived event + WaitForSingleObject for zero-latency frame waiting.
 
 use anyhow::{bail, Context, Result};
 use windows::core::Interface;
@@ -21,61 +21,61 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use crate::d3d11::D3D11Context;
 
 // ---------------------------------------------------------------------------
-// 公共类型
+// Public types
 // ---------------------------------------------------------------------------
 
-/// 捕获目标类型
+/// Capture target type
 #[derive(Debug, Clone, Copy)]
 pub enum CaptureTarget {
-    /// 显示器捕获
+    /// Monitor capture
     Monitor(HMONITOR),
-    /// 窗口捕获
+    /// Window capture
     Window(HWND),
 }
 
 // ---------------------------------------------------------------------------
-// WGC 捕获会话
+// WGC capture session
 // ---------------------------------------------------------------------------
 
-/// WGC 捕获会话
+/// WGC capture session
 pub struct WGCCapture {
-    /// 持有所有权，drop 时停止捕获
+    /// Holds ownership, stops capture on drop
     _item: GraphicsCaptureItem,
     frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
-    /// FrameArrived 信号事件（内核对象，WaitForSingleObject 用）
+    /// FrameArrived signal event (kernel object, for WaitForSingleObject)
     frame_event: HANDLE,
-    /// 捕获目标初始尺寸（用于预创建 Staging Texture）
+    /// Initial size of capture target (for pre-creating Staging Texture)
     target_width: u32,
     target_height: u32,
 }
 
 impl WGCCapture {
-    /// 启动捕获
+    /// Start capture
     pub fn start(&self) -> Result<()> {
         self.session.StartCapture()?;
         Ok(())
     }
 
-    /// 捕获目标的初始尺寸
+    /// Initial size of capture target
     pub fn target_size(&self) -> (u32, u32) {
         (self.target_width, self.target_height)
     }
 
-    /// 尝试从 FramePool 取出一帧（非阻塞）
+    /// Try to get a frame from FramePool (non-blocking)
     ///
-    /// 返回原始 `Direct3D11CaptureFrame`，调用方控制其生命周期。
-    /// 必须在 frame 被 drop 之前完成对底层 surface 的访问（如 CopyResource）。
+    /// Returns the raw `Direct3D11CaptureFrame`, caller controls its lifetime.
+    /// Must complete access to the underlying surface (e.g., CopyResource) before frame is dropped.
     pub fn try_get_next_frame(&self) -> Result<Direct3D11CaptureFrame> {
         Ok(self.frame_pool.TryGetNextFrame()?)
     }
 
-    /// 等待下一帧到达（阻塞，带超时）
+    /// Wait for next frame arrival (blocking, with timeout)
     ///
-    /// 使用内核事件等待，不消耗 CPU，唤醒延迟 ~0ms。
-    /// 返回后调用 `try_get_next_frame()` 获取帧。
+    /// Uses kernel event waiting, no CPU consumption, wake latency ~0ms.
+    /// Call `try_get_next_frame()` to get the frame after return.
     pub fn wait_for_frame(&self, timeout_ms: u32) -> Result<()> {
-        // SAFETY: frame_event 在 init_capture 中创建，生命周期覆盖整个 WGCCapture
+        // SAFETY: frame_event is created in init_capture, lifetime covers entire WGCCapture
         let result = unsafe { WaitForSingleObject(self.frame_event, timeout_ms) };
         if result.0 != 0 {
             // WAIT_TIMEOUT = 0x102, WAIT_FAILED = 0xFFFFFFFF
@@ -88,15 +88,15 @@ impl WGCCapture {
         Ok(())
     }
 
-    /// 从 `Direct3D11CaptureFrame` 中提取 `ID3D11Texture2D`
+    /// Extract `ID3D11Texture2D` from `Direct3D11CaptureFrame`
     ///
-    /// frame 必须在返回的 texture 被使用完毕后才能 drop。
+    /// frame must not be dropped until the returned texture is no longer needed.
     pub fn frame_to_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D> {
         let surface: IDirect3DSurface = frame.Surface()?;
         let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
 
-        // SAFETY: GetInterface 是 Win32 COM 互操作调用
-        // access 由上方 cast() 成功获取，保证有效
+        // SAFETY: GetInterface is Win32 COM interop call
+        // access obtained successfully from cast() above, guaranteed valid
         let texture: ID3D11Texture2D = unsafe {
             access
                 .GetInterface()
@@ -110,7 +110,7 @@ impl WGCCapture {
 impl Drop for WGCCapture {
     fn drop(&mut self) {
         if !self.frame_event.is_invalid() {
-            // SAFETY: frame_event 是我们创建的有效句柄，只关闭一次
+            // SAFETY: frame_event is a valid handle we created, only close once
             unsafe {
                 let _ = CloseHandle(self.frame_event);
             }
@@ -119,12 +119,12 @@ impl Drop for WGCCapture {
 }
 
 // ---------------------------------------------------------------------------
-// 捕获初始化
+// Capture initialization
 // ---------------------------------------------------------------------------
 
-/// 从显示器句柄创建 GraphicsCaptureItem
+/// Create GraphicsCaptureItem from monitor handle
 fn create_capture_item_for_monitor(hmonitor: HMONITOR) -> Result<GraphicsCaptureItem> {
-    // SAFETY: 工厂函数调用，失败可能意味着系统不支持或 COM 未初始化
+    // SAFETY: factory function call, failure may mean system not supported or COM not initialized
     unsafe {
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
@@ -138,9 +138,9 @@ fn create_capture_item_for_monitor(hmonitor: HMONITOR) -> Result<GraphicsCapture
     }
 }
 
-/// 从窗口句柄创建 GraphicsCaptureItem
+/// Create GraphicsCaptureItem from window handle
 fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
-    // SAFETY: 工厂函数调用，同上
+    // SAFETY: factory function call, same as above
     unsafe {
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
@@ -153,16 +153,16 @@ fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
     }
 }
 
-/// 初始化 WGC 捕获会话
+/// Initialize WGC capture session
 ///
-/// 统一使用 BGRA8 格式，DWM 自动处理 HDR→SDR 色调映射。
-/// 注册 FrameArrived 事件回调，通过内核事件实现零延迟帧等待。
+/// Uniformly uses BGRA8 format, DWM automatically handles HDR→SDR tone mapping.
+/// Registers FrameArrived event callback, implements zero-latency frame waiting via kernel event.
 ///
 /// # Arguments
-/// * `d3d_ctx` - D3D11 设备上下文
-/// * `target` - 捕获目标（显示器或窗口）
+/// * `d3d_ctx` - D3D11 device context
+/// * `target` - Capture target (monitor or window)
 pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGCCapture> {
-    // 1. 根据目标类型创建 GraphicsCaptureItem
+    // 1. Create GraphicsCaptureItem based on target type
     let item = match target {
         CaptureTarget::Monitor(monitor) => create_capture_item_for_monitor(monitor)?,
         CaptureTarget::Window(hwnd) => create_capture_item_for_window(hwnd)?,
@@ -170,22 +170,22 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
 
     let size = item.Size()?;
 
-    // 2. 创建 FramePool（固定 BGRA8，DWM 自动处理 HDR→SDR）
+    // 2. Create FramePool (fixed BGRA8, DWM auto handles HDR→SDR)
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &d3d_ctx.direct3d_device,
         DirectXPixelFormat::B8G8R8A8UIntNormalized,
-        2, // 缓冲区数量
+        2, // Buffer count
         size,
     )?;
 
-    // 3. 创建内核事件（自动复位，初始无信号）
-    // SAFETY: CreateEventW 创建匿名事件对象
+    // 3. Create kernel event (auto-reset, initially non-signaled)
+    // SAFETY: CreateEventW creates anonymous event object
     let frame_event =
         unsafe { CreateEventW(None, false, false, None).context("Failed to create frame event")? };
 
-    // 4. 注册 FrameArrived 回调：仅 SetEvent，不做任何 D3D 操作
-    // 将 HANDLE 转为 usize 传入闭包，绕过 Send 限制。
-    // SAFETY: 内核事件句柄是线程安全的，可从任意线程 SetEvent。
+    // 4. Register FrameArrived callback: only SetEvent, no D3D operations
+    // Convert HANDLE to usize for closure, bypassing Send restriction.
+    // SAFETY: Kernel event handles are thread-safe, SetEvent can be called from any thread.
     let event_ptr = frame_event.0 as usize;
     frame_pool.FrameArrived(&TypedEventHandler::<
         Direct3D11CaptureFramePool,

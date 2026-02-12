@@ -25,18 +25,18 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
-    # WinRT 互操作
+    # WinRT interop
     "Win32_System_WinRT",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_System_WinRT_Direct3D11",
-    # 窗口与显示器枚举
+    # Window and monitor enumeration
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_Security",
-    # 基础
+    # Foundation
     "Win32_Foundation",
 ] }
 anyhow = "1.0"

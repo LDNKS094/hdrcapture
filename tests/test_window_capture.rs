@@ -1,23 +1,23 @@
-// 集成测试：按进程名截取指定窗口
+// Integration test: Capture specified window by process name
 //
-// 修改 TARGET_PROCESS 来指定要截取的进程。
-// 如果目标窗口不存在，测试会优雅地跳过。
+// Modify TARGET_PROCESS to specify the process to capture.
+// If target window doesn't exist, test will gracefully skip.
 
 use hdrcapture::capture::find_window;
 use hdrcapture::pipeline::CapturePipeline;
 
 // ---------------------------------------------------------------------------
-// 配置：修改这里来指定目标窗口
+// Configuration: modify here to specify target window
 // ---------------------------------------------------------------------------
 
-/// 目标进程名（如 "notepad.exe"、"chrome.exe"）
+/// Target process name (e.g., "notepad.exe", "chrome.exe")
 const TARGET_PROCESS: &str = "notepad.exe";
 
-/// 窗口索引（同一进程有多个窗口时，0 = 第一个）
+/// Window index (when process has multiple windows, 0 = first)
 const TARGET_INDEX: usize = 0;
 
 // ---------------------------------------------------------------------------
-// 测试
+// Tests
 // ---------------------------------------------------------------------------
 
 #[test]

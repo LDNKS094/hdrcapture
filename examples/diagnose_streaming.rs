@@ -1,9 +1,9 @@
-// 诊断工具：分段计时 streaming 各阶段耗时
+// Diagnostic tool: measure streaming per-phase timing
 //
-// 直接调用底层组件，绕过 CapturePipeline 封装，
-// 精确测量 drain / wait / read 各阶段耗时。
+// Directly calls low-level components, bypassing CapturePipeline wrapper,
+// precisely measuring drain / wait / read phase timings.
 //
-// 用法：cargo run --release --example diagnose_streaming
+// Usage: cargo run --release --example diagnose_streaming
 
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -50,7 +50,7 @@ fn capture_one_frame_timed(
     let t_total = Instant::now();
     let deadline = Instant::now() + FRAME_TIMEOUT;
 
-    // 阶段 1：drain
+    // Phase 1: drain
     let t_drain = Instant::now();
     let mut drain_count = 0usize;
     let mut latest = None;
@@ -62,7 +62,7 @@ fn capture_one_frame_timed(
     }
     let drain_ms = t_drain.elapsed().as_secs_f64() * 1000.0;
 
-    // 阶段 2：wait
+    // Phase 2: wait
     let t_wait = Instant::now();
     let frame = match latest {
         Some(f) => f,
@@ -70,7 +70,7 @@ fn capture_one_frame_timed(
     };
     let wait_ms = t_wait.elapsed().as_secs_f64() * 1000.0;
 
-    // 阶段 3：read (frame_to_texture + read_texture)
+    // Phase 3: read (frame_to_texture + read_texture)
     let t_read = Instant::now();
     let texture = WGCCapture::frame_to_texture(&frame).unwrap();
     let _data = reader.read_texture(&texture).unwrap();
@@ -103,21 +103,21 @@ fn run_diagnosis(d3d_ctx: &D3D11Context, fresh: bool) -> String {
 
     let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-    // 首帧
+    // First frame
     let _ = wait_frame(&capture, Instant::now() + FRAME_TIMEOUT);
 
-    // 预热
+    // Warm-up
     for _ in 0..WARMUP_FRAMES {
         capture_one_frame_timed(&capture, &mut reader, fresh);
     }
 
-    // 测试
+    // Test
     let mut timings: Vec<FrameTiming> = Vec::with_capacity(TEST_FRAMES);
     for _ in 0..TEST_FRAMES {
         timings.push(capture_one_frame_timed(&capture, &mut reader, fresh));
     }
 
-    // 统计
+    // Statistics
     let mut drain_vals: Vec<f64> = timings.iter().map(|t| t.drain_ms).collect();
     let mut wait_vals: Vec<f64> = timings.iter().map(|t| t.wait_ms).collect();
     let mut read_vals: Vec<f64> = timings.iter().map(|t| t.read_ms).collect();
@@ -171,7 +171,7 @@ fn run_diagnosis(d3d_ctx: &D3D11Context, fresh: bool) -> String {
     .unwrap();
     writeln!(s).unwrap();
 
-    // 输出前 10 帧逐帧明细，方便观察模式
+    // Output first 10 frame details for pattern observation
     writeln!(s, "  first 10 frames detail:").unwrap();
     for (i, t) in timings.iter().take(10).enumerate() {
         writeln!(
@@ -183,7 +183,7 @@ fn run_diagnosis(d3d_ctx: &D3D11Context, fresh: bool) -> String {
     }
     writeln!(s).unwrap();
 
-    // 输出最慢的 5 帧
+    // Output slowest 5 frames
     let mut indexed: Vec<(usize, &FrameTiming)> = timings.iter().enumerate().collect();
     indexed.sort_by(|a, b| b.1.total_ms.partial_cmp(&a.1.total_ms).unwrap());
     writeln!(s, "  slowest 5 frames:").unwrap();

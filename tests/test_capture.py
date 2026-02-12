@@ -1,4 +1,4 @@
-"""hdrcapture Python API 功能验证 + 耗时统计"""
+"""hdrcapture Python API functional verification + timing stats"""
 
 import time
 import hdrcapture
@@ -6,7 +6,7 @@ import numpy as np
 
 
 def timed(label, fn):
-    """执行 fn 并打印耗时"""
+    """Execute fn and print elapsed time"""
     t0 = time.perf_counter()
     result = fn()
     dt = (time.perf_counter() - t0) * 1000
@@ -15,23 +15,23 @@ def timed(label, fn):
 
 
 def main():
-    print("=== 功能验证 ===\n")
+    print("=== Functional Verification ===\n")
 
-    # 1. screenshot（冷启动）
+    # 1. screenshot (cold start)
     print("[1] screenshot()")
     frame = timed("cold start", lambda: hdrcapture.screenshot())
     print(f"  {repr(frame)}")
     timed("save png", lambda: frame.save("tests/results/test_screenshot.png"))
 
-    # 2. numpy 转换
-    print("\n[2] numpy 转换")
+    # 2. numpy conversion
+    print("\n[2] numpy conversion")
     arr = timed("ndarray()", lambda: frame.ndarray())
     print(f"  shape={arr.shape}, dtype={arr.dtype}")
     arr2 = timed("np.array()", lambda: np.array(frame))
     print(f"  __array__ match: {np.array_equal(arr, arr2)}")
 
-    # 3. Capture 类 — capture + grab
-    print("\n[3] Capture 类")
+    # 3. Capture class — capture + grab
+    print("\n[3] Capture class")
     cap = timed("Capture.monitor(0)", lambda: hdrcapture.Capture.monitor(0))
     f1 = timed("capture()", lambda: cap.capture())
     f2 = timed("grab()", lambda: cap.grab())
@@ -53,8 +53,8 @@ def main():
     except RuntimeError as e:
         print(f"  close works: {e}")
 
-    # 5. 连续取帧性能
-    print("\n[5] 连续取帧性能 (20 rounds)")
+    # 5. Continuous capture performance
+    print("\n[5] Continuous capture performance (20 rounds)")
     cap3 = hdrcapture.Capture.monitor(0)
     _ = cap3.grab()  # warm up
 
@@ -72,8 +72,8 @@ def main():
     print(f"  max:  {times[-1]:.2f}ms")
     print(f"  avg:  {sum(times)/len(times):.2f}ms")
 
-    # 6. 错误处理
-    print("\n[6] 错误处理")
+    # 6. Error handling
+    print("\n[6] Error handling")
     try:
         hdrcapture.screenshot(monitor=999)
         print("  ERROR: should have raised")

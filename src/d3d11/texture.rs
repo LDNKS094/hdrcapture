@@ -1,10 +1,10 @@
-// 纹理创建与回读工具函数
+// Texture creation and readback utility functions
 
 use anyhow::{bail, Context, Result};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-/// 根据 DXGI_FORMAT 返回每像素字节数
+/// Returns bytes per pixel for the given DXGI_FORMAT
 fn bytes_per_pixel(format: DXGI_FORMAT) -> Result<usize> {
     match format {
         DXGI_FORMAT_R16G16B16A16_FLOAT => Ok(8), // 4 × f16
@@ -13,10 +13,10 @@ fn bytes_per_pixel(format: DXGI_FORMAT) -> Result<usize> {
     }
 }
 
-/// 纹理读取器：负责将 GPU 纹理数据回读到 CPU
+/// Texture reader: responsible for reading GPU texture data back to CPU
 ///
-/// Staging texture 按需创建并缓存复用，尺寸/格式变化时自动重建。
-/// 返回的 buffer 已剥离 RowPitch 填充，可直接按 `width * bpp` 索引。
+/// Staging texture is created on demand and cached for reuse, automatically rebuilt when size/format changes.
+/// The returned buffer has RowPitch padding stripped and can be indexed directly by `width * bpp`.
 pub struct TextureReader {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -40,7 +40,7 @@ impl TextureReader {
         }
     }
 
-    /// 确保 Staging Texture 存在且尺寸/格式匹配
+    /// Ensure Staging Texture exists and matches size/format
     pub fn ensure_staging_texture(
         &mut self,
         width: u32,
@@ -83,7 +83,7 @@ impl TextureReader {
             self.format = format;
         }
 
-        // 预分配 buffer（尺寸变化时自动调整，不缩小）
+        // Pre-allocate buffer (auto-adjusted on size change, never shrinks)
         let required = width as usize * height as usize * bytes_per_pixel(format)?;
         if self.buffer.len() < required {
             self.buffer.resize(required, 0);
@@ -114,10 +114,10 @@ impl TextureReader {
         }
     }
 
-    /// 从 GPU 纹理读取数据到 CPU
+    /// Read data from GPU texture to CPU
     ///
-    /// 返回拥有所有权的 `Vec<u8>`，已剥离 RowPitch 填充，每行恰好 `width * bytes_per_pixel` 字节。
-    /// 内部复用 scratch buffer 避免重复分配，返回时执行一次 memcpy 交付所有权。
+    /// Returns an owned `Vec<u8>` with RowPitch padding stripped, each row exactly `width * bytes_per_pixel` bytes.
+    /// Internally reuses scratch buffer to avoid repeated allocations, performs one memcpy to transfer ownership on return.
     pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
@@ -130,10 +130,10 @@ impl TextureReader {
         let staging = self.staging_texture.as_ref().unwrap();
 
         unsafe {
-            // GPU → Staging 拷贝
+            // GPU → Staging copy
             self.context.CopyResource(staging, source_texture);
 
-            // 映射内存供 CPU 读取
+            // Map memory for CPU read access
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
@@ -143,11 +143,11 @@ impl TextureReader {
             let row_bytes = desc.Width as usize * bpp;
             let height = desc.Height as usize;
 
-            // 逐行拷贝到 scratch buffer，剥离 RowPitch 末尾填充
+            // Copy row by row to scratch buffer, stripping RowPitch trailing padding
             let src = mapped.pData as *const u8;
             for y in 0..height {
-                // SAFETY: src 指向 mapped GPU 内存，row_pitch * y + row_bytes 不超过映射范围；
-                //         self.buffer 已在 ensure_staging_texture 中预分配足够空间。
+                // SAFETY: src points to mapped GPU memory, row_pitch * y + row_bytes is within mapped range;
+                //         self.buffer has been pre-allocated with sufficient space in ensure_staging_texture.
                 std::ptr::copy_nonoverlapping(
                     src.add(y * row_pitch),
                     self.buffer.as_mut_ptr().add(y * row_bytes),
@@ -157,7 +157,7 @@ impl TextureReader {
 
             self.context.Unmap(staging, 0);
 
-            // 交付所有权：从 scratch buffer 拷贝一份返回
+            // Transfer ownership: copy from scratch buffer and return
             Ok(self.buffer[..row_bytes * height].to_vec())
         }
     }
@@ -173,7 +173,7 @@ mod tests {
         let d3d_ctx = create_d3d11_device().unwrap();
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-        // 2x2 R16G16B16A16_FLOAT，全红像素
+        // 2x2 R16G16B16A16_FLOAT, all red pixels
         // f16: 1.0 = 0x3C00, 0.0 = 0x0000
         let pixel_red: [u16; 4] = [0x3C00, 0x0000, 0x0000, 0x3C00];
         let mut init_data = Vec::new();
@@ -215,17 +215,17 @@ mod tests {
 
             let data = reader.read_texture(&texture).unwrap();
 
-            // 剥离填充后，数据大小应恰好 = 2 × 2 × 8 = 32 字节
+            // After stripping padding, data size should be exactly 2 × 2 × 8 = 32 bytes
             assert_eq!(data.len(), 32, "Stripped buffer should be exactly 32 bytes");
 
-            // 验证第一个像素
+            // Verify first pixel
             let u16_data = std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2);
             assert_eq!(u16_data[0], 0x3C00); // R
             assert_eq!(u16_data[1], 0x0000); // G
             assert_eq!(u16_data[2], 0x0000); // B
             assert_eq!(u16_data[3], 0x3C00); // A
 
-            // 验证第二行第一个像素（offset = row_bytes = 16 bytes = 8 u16）
+            // Verify first pixel of second row (offset = row_bytes = 16 bytes = 8 u16)
             assert_eq!(u16_data[8], 0x3C00); // R
             assert_eq!(u16_data[9], 0x0000); // G
         }

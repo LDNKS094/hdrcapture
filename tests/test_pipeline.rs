@@ -1,4 +1,4 @@
-// 集成测试：通过 Pipeline API 截图
+// Integration test: Screenshot via Pipeline API
 
 use hdrcapture::pipeline::CapturePipeline;
 
@@ -31,7 +31,7 @@ fn test_pipeline_monitor_capture() {
 fn test_pipeline_consecutive_frames() {
     let mut pipeline = CapturePipeline::monitor(0).expect("Failed to create pipeline");
 
-    // 连续捕获 3 帧，验证排空策略和 buffer 复用
+    // Consecutively capture 3 frames, verify drain strategy and buffer reuse
     for i in 0..3 {
         let frame = pipeline
             .capture()
