@@ -44,10 +44,11 @@ pub fn create_d3d11_device() -> anyhow::Result<D3D11Context> {
     let dxgi_device: IDXGIDevice = device.cast().unwrap();
 
     let direct3d_device: IDirect3DDevice = unsafe {
+        // SAFETY: dxgi_device is a valid IDXGIDevice from D3D11CreateDevice.
         CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)
-            .unwrap()
+            .context("CreateDirect3D11DeviceFromDXGIDevice failed")?
             .cast()
-            .unwrap()
+            .unwrap() // infallible: IDirect3DDevice is always implemented
     };
 
     Ok(D3D11Context {

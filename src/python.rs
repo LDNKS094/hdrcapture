@@ -7,6 +7,8 @@
 // Pipeline 保持纯 Rust，不依赖 pyo3/numpy。
 // 本模块负责跨语言桥接和错误映射。
 
+use std::panic::AssertUnwindSafe;
+
 use numpy::ndarray::Array3;
 use numpy::{IntoPyArray, PyArray3};
 use pyo3::exceptions::PyRuntimeError;
@@ -14,20 +16,31 @@ use pyo3::prelude::*;
 
 use crate::pipeline;
 
-/// 释放 GIL 执行纯 Rust 闭包，完成后重新获取 GIL。
+/// Release the GIL, execute a pure-Rust closure, then re-acquire the GIL.
 ///
-/// 与 `py.detach()` 相同，但绕过 `Ungil` (Send) 约束。
-/// 安全前提：闭包在当前线程执行，不跨线程传递捕获的引用。
-/// 本项目中 `CapturePipeline` 包含 Win32 HANDLE 和 COM 指针（非 Send），
-/// 但 `Capture` 已标记 `unsendable`，保证只在创建线程上使用。
-fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> T {
-    // SAFETY: SuspendAttach 释放 GIL 并在 drop 时重新获取。
-    // 闭包在同一线程上同步执行，不跨线程传递非 Send 类型。
-    let _guard = unsafe { pyo3::ffi::PyEval_SaveThread() };
-    let result = f();
-    unsafe { pyo3::ffi::PyEval_RestoreThread(_guard) };
+/// Equivalent to `py.detach()` but bypasses the `Ungil` (Send) bound.
+/// `CapturePipeline` holds Win32 HANDLE and COM pointers (not Send),
+/// but `Capture` is marked `unsendable`, guaranteeing single-thread usage.
+///
+/// Panics inside the closure are caught and converted to Python RuntimeError,
+/// ensuring the GIL is always restored.
+fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
+    // SAFETY: We release the GIL and re-acquire it on the same thread.
+    // The closure executes synchronously; no non-Send types cross threads.
+    let save = unsafe { pyo3::ffi::PyEval_SaveThread() };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(f));
+    unsafe { pyo3::ffi::PyEval_RestoreThread(save) };
     let _ = py;
-    result
+    result.map_err(|panic| {
+        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+            format!("internal error: {}", s)
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            format!("internal error: {}", s)
+        } else {
+            "internal error: unknown panic".to_string()
+        };
+        PyRuntimeError::new_err(msg)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +83,7 @@ impl CapturedFrame {
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = &self.inner;
         let path = path.to_string();
-        detach_gil(py, || inner.save(&path)).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        detach_gil(py, || inner.save(&path))?.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// 转换为 ndarray
@@ -177,7 +190,7 @@ impl Capture {
     fn capture(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
         let frame =
-            detach_gil(py, || p.capture()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            detach_gil(py, || p.capture())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(CapturedFrame { inner: frame })
     }
 
@@ -188,7 +201,7 @@ impl Capture {
     fn grab(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
         let frame =
-            detach_gil(py, || p.grab()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            detach_gil(py, || p.grab())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(CapturedFrame { inner: frame })
     }
 
@@ -237,7 +250,7 @@ impl Capture {
 #[pyfunction]
 #[pyo3(signature = (monitor=0))]
 fn screenshot(py: Python<'_>, monitor: usize) -> PyResult<CapturedFrame> {
-    let frame = detach_gil(py, || pipeline::screenshot(monitor))
+    let frame = detach_gil(py, || pipeline::screenshot(monitor))?
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(CapturedFrame { inner: frame })
 }

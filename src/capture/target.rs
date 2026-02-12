@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -79,6 +79,9 @@ unsafe extern "system" fn enum_monitor_proc(
     _: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
+    // SAFETY: lparam points to a Vec<HMONITOR> on the caller's stack in enumerate_monitors().
+    // The Vec's lifetime spans the entire EnumDisplayMonitors call, and the callback
+    // executes synchronously on the same thread.
     let monitors = &mut *(lparam.0 as *mut Vec<HMONITOR>);
     monitors.push(hmonitor);
     BOOL(1)
@@ -132,8 +135,21 @@ fn get_pids_by_name(process_name: &str) -> Result<HashSet<u32>> {
     let mut pids = HashSet::new();
 
     unsafe {
+        // SAFETY: Win32 API call, HANDLE must be closed after use.
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
             .context("CreateToolhelp32Snapshot failed")?;
+
+        // RAII guard: CloseHandle on drop, even if we return early via `?`
+        struct SnapshotGuard(HANDLE);
+        impl Drop for SnapshotGuard {
+            fn drop(&mut self) {
+                // SAFETY: self.0 is a valid snapshot handle from CreateToolhelp32Snapshot.
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+        let _guard = SnapshotGuard(snapshot);
 
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -181,6 +197,8 @@ struct EnumCtx<'a> {
 }
 
 unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: lparam points to an EnumCtx on the caller's stack in enumerate_windows_by_pids().
+    // Same lifetime and single-thread guarantees as enum_monitor_proc.
     let ctx = &mut *(lparam.0 as *mut EnumCtx);
 
     if !IsWindowVisible(hwnd).as_bool() {

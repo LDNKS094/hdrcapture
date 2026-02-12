@@ -67,9 +67,7 @@ impl WGCCapture {
     /// 返回原始 `Direct3D11CaptureFrame`，调用方控制其生命周期。
     /// 必须在 frame 被 drop 之前完成对底层 surface 的访问（如 CopyResource）。
     pub fn try_get_next_frame(&self) -> Result<Direct3D11CaptureFrame> {
-        self.frame_pool
-            .TryGetNextFrame()
-            .context("TryGetNextFrame failed")
+        Ok(self.frame_pool.TryGetNextFrame()?)
     }
 
     /// 等待下一帧到达（阻塞，带超时）
@@ -194,7 +192,9 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
         windows::core::IInspectable,
     >::new(move |_, _| {
         unsafe {
-            let _ = SetEvent(HANDLE(event_ptr as *mut _));
+            if SetEvent(HANDLE(event_ptr as *mut _)).is_err() {
+                eprintln!("hdrcapture: SetEvent failed in FrameArrived callback");
+            }
         }
         Ok(())
     }))?;

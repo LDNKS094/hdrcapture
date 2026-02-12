@@ -22,6 +22,10 @@ use crate::d3d11::{create_d3d11_device, D3D11Context};
 /// 首帧等待超时时间
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// 等待新帧的短超时（~3 VSyncs at 60Hz）
+/// 屏幕活跃时新帧在 1 VSync 内到达；超时说明屏幕静止，应使用 fallback。
+const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
+
 /// 一帧捕获结果
 pub struct CapturedFrame {
     /// BGRA8 像素数据，长度 = width * height * 4
@@ -70,6 +74,9 @@ pub struct CapturePipeline {
     /// 首次调用标记。StartCapture() 后的首帧天然是 fresh 的，
     /// 无需 drain-discard，直接取即可省 ~1 VSync。
     first_call: bool,
+    /// Timestamp from the last successful read_frame(), for static-screen fallback.
+    /// Pixel data and dimensions live in TextureReader (persists across calls).
+    cached_timestamp: Option<f64>,
 }
 
 impl CapturePipeline {
@@ -107,29 +114,43 @@ impl CapturePipeline {
             capture,
             reader,
             first_call: true,
+            cached_timestamp: None,
         })
     }
 
-    /// 等待下一帧（带超时），使用内核事件唤醒
-    fn wait_frame(
+    /// Wait for the next frame from the pool, with timeout.
+    /// Returns None on timeout instead of error.
+    fn try_wait_frame(
         &self,
-        deadline: Instant,
-    ) -> Result<windows::Graphics::Capture::Direct3D11CaptureFrame> {
+        timeout: Duration,
+    ) -> Result<Option<windows::Graphics::Capture::Direct3D11CaptureFrame>> {
+        let deadline = Instant::now() + timeout;
         loop {
             if let Ok(f) = self.capture.try_get_next_frame() {
-                return Ok(f);
+                return Ok(Some(f));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                bail!(
-                    "Timeout waiting for capture frame ({}ms)",
-                    FIRST_FRAME_TIMEOUT.as_millis()
-                );
+                return Ok(None);
             }
-            // 内核级等待，不消耗 CPU，唤醒延迟 ~0ms
             let timeout_ms = remaining.as_millis().min(u32::MAX as u128) as u32;
-            self.capture.wait_for_frame(timeout_ms)?;
+            if self.capture.wait_for_frame(timeout_ms).is_err() {
+                return Ok(None);
+            }
         }
+    }
+
+    /// Wait for the next frame, returning error on timeout.
+    fn wait_frame(
+        &self,
+        timeout: Duration,
+    ) -> Result<windows::Graphics::Capture::Direct3D11CaptureFrame> {
+        self.try_wait_frame(timeout)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Timeout waiting for capture frame ({}ms)",
+                timeout.as_millis()
+            )
+        })
     }
 
     /// 从 WGC 帧中提取纹理并回读像素数据
@@ -149,6 +170,30 @@ impl CapturePipeline {
         };
 
         let data = self.reader.read_texture(&texture)?;
+
+        // Cache timestamp for static-screen fallback.
+        // Pixel data and dimensions are already in TextureReader.
+        self.cached_timestamp = Some(timestamp);
+
+        Ok(CapturedFrame {
+            data,
+            width,
+            height,
+            timestamp,
+        })
+    }
+
+    /// Build a CapturedFrame from the cached pixel data in TextureReader.
+    /// Only called on the fallback path (static screen, no new frames available).
+    fn build_cached_frame(&self) -> Result<CapturedFrame> {
+        let timestamp = self
+            .cached_timestamp
+            .expect("build_cached_frame called without cached data");
+        let (width, height) = self.reader.last_dimensions();
+        let data = self.reader.clone_buffer();
+        if data.is_empty() {
+            bail!("No cached frame data available");
+        }
         Ok(CapturedFrame {
             data,
             width,
@@ -161,23 +206,42 @@ impl CapturePipeline {
     ///
     /// 排空积压帧 → 等待 DWM 推送新帧，保证返回的帧是调用之后产生的。
     /// 首次调用时跳过排空（首帧天然是 fresh 的）。
+    /// 屏幕静止时使用 fallback 避免长时间阻塞。
     ///
     /// 适合截图场景，延迟 ~1 VSync。
     pub fn capture(&mut self) -> Result<CapturedFrame> {
-        let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
-
         // 首次调用：StartCapture() 后的首帧天然是 fresh 的，直接取即可
         if self.first_call {
             self.first_call = false;
-            let frame = self.wait_frame(deadline)?;
+            let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
             return self.read_frame(&frame);
         }
 
-        // 排空积压帧（全部丢弃）
-        while self.capture.try_get_next_frame().is_ok() {}
+        // Drain pool, keep last frame as fallback
+        let mut fallback = None;
+        while let Ok(f) = self.capture.try_get_next_frame() {
+            fallback = Some(f);
+        }
 
-        // 等待全新帧
-        let frame = self.wait_frame(deadline)?;
+        // Try to get a fresh frame with short timeout
+        if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
+            // New frame arrived — use it (discard fallback if any)
+            return self.read_frame(&fresh);
+        }
+
+        // Timeout — screen is likely static
+        if let Some(fb) = fallback {
+            // Use the last drained frame (most recent available)
+            return self.read_frame(&fb);
+        }
+
+        // Pool was empty AND no new frame — use cached data
+        if self.cached_timestamp.is_some() {
+            return self.build_cached_frame();
+        }
+
+        // No cache either — true cold start edge case, full timeout
+        let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
         self.read_frame(&frame)
     }
 
@@ -185,29 +249,40 @@ impl CapturePipeline {
     ///
     /// 排空积压帧，保留最后一帧；池空时等待新帧。
     /// 返回的帧可能是调用之前产生的，但延迟更低。
+    /// 屏幕静止时使用 fallback 避免长时间阻塞。
     ///
     /// 适合高频连续取帧场景。
     pub fn grab(&mut self) -> Result<CapturedFrame> {
-        let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
-
         // 首次调用：直接取首帧
         if self.first_call {
             self.first_call = false;
-            let frame = self.wait_frame(deadline)?;
+            let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
             return self.read_frame(&frame);
         }
 
-        // 排空积压帧，保留最后一帧
+        // Drain pool, keep last frame
         let mut latest = None;
         while let Ok(f) = self.capture.try_get_next_frame() {
             latest = Some(f);
         }
 
-        let frame = match latest {
-            Some(f) => f,
-            None => self.wait_frame(deadline)?,
-        };
+        // Got a buffered frame — use it
+        if let Some(f) = latest {
+            return self.read_frame(&f);
+        }
 
+        // Pool empty — try short wait for new frame
+        if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
+            return self.read_frame(&fresh);
+        }
+
+        // Timeout — screen is likely static, use cached data
+        if self.cached_timestamp.is_some() {
+            return self.build_cached_frame();
+        }
+
+        // No cache — full timeout (should not happen in normal usage)
+        let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
         self.read_frame(&frame)
     }
 }
