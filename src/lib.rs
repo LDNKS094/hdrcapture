@@ -1,7 +1,25 @@
-// HDR Capture Library
-// 解决 Windows HDR 环境下屏幕截图泛白问题
-//
-// 核心原理：WGC 请求 BGRA8 格式时，DWM 自动完成 HDR→SDR 色调映射。
+//! # hdrcapture
+//!
+//! Windows screen capture that works correctly under HDR.
+//!
+//! When Windows HDR is enabled, existing screenshot tools produce washed-out images.
+//! This library uses Windows Graphics Capture (WGC) with DWM's built-in HDR→SDR
+//! tone mapping to deliver accurate colors with zero configuration.
+//!
+//! ## Rust usage
+//!
+//! ```no_run
+//! use hdrcapture::pipeline;
+//!
+//! // One-shot screenshot
+//! let frame = pipeline::screenshot(0).unwrap();
+//! frame.save("screenshot.png").unwrap();
+//!
+//! // Reusable pipeline
+//! let mut cap = pipeline::CapturePipeline::monitor(0).unwrap();
+//! let frame = cap.capture().unwrap();
+//! println!("{}x{}", frame.width, frame.height);
+//! ```
 
 #![cfg(windows)]
 

@@ -39,8 +39,7 @@ impl CapturedFrame {
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let file = std::fs::File::create(path.as_ref())?;
         let writer = std::io::BufWriter::new(file);
-        let encoder =
-            PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
+        let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
 
         // BGRA → RGBA
         let mut rgba = self.data.clone();

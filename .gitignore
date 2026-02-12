@@ -1,6 +1,8 @@
-nul
 tests/results/
+docs/dev/
+ref/
 .serena/
+
 # Rust
 /target/
 **/*.rs.bk
@@ -22,7 +24,7 @@ build/
 env/
 venv/
 ENV/
-.venv
+.venv/
 
 # PyO3 / Maturin
 *.pyd
@@ -36,10 +38,6 @@ ENV/
 *.swo
 *~
 .DS_Store
-
-# Compiled shaders
-*.cso
-shaders/*.cso
 
 # Test outputs
 *.png
@@ -60,8 +58,3 @@ Desktop.ini
 *.tmp
 *.temp
 *.bak
-
-
-# Added by cargo
-
-/target

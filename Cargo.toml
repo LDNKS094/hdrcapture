@@ -3,9 +3,12 @@ name = "hdrcapture"
 version = "0.1.0"
 edition = "2021"
 authors = ["LDNKS094"]
-description = "High Dynamic Range screen capture library for Windows"
+description = "Windows screen capture that works correctly under HDR"
 license = "MIT"
-repository = ""
+repository = "https://github.com/LDNKS094/hdrcapture"
+readme = "README.md"
+keywords = ["screenshot", "screen-capture", "hdr", "windows"]
+categories = ["multimedia::images", "os::windows-apis"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

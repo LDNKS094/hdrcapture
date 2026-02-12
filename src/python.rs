@@ -70,8 +70,7 @@ impl CapturedFrame {
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = &self.inner;
         let path = path.to_string();
-        detach_gil(py, || inner.save(&path))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        detach_gil(py, || inner.save(&path)).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// 转换为 ndarray
@@ -177,8 +176,8 @@ impl Capture {
     /// 等待和回读期间释放 GIL，不阻塞其他 Python 线程。
     fn capture(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
-        let frame = detach_gil(py, || p.capture())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let frame =
+            detach_gil(py, || p.capture()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(CapturedFrame { inner: frame })
     }
 
@@ -188,8 +187,8 @@ impl Capture {
     /// 等待和回读期间释放 GIL，不阻塞其他 Python 线程。
     fn grab(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
         let p = self.get_pipeline()?;
-        let frame = detach_gil(py, || p.grab())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let frame =
+            detach_gil(py, || p.grab()).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(CapturedFrame { inner: frame })
     }
 
