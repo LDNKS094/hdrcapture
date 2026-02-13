@@ -6,6 +6,7 @@
 // Frame lifetime covers CopyResource, ensuring DWM won't overwrite the surface being read.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -42,8 +43,8 @@ const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 /// Single frame capture result
 #[derive(Clone)]
 pub struct CapturedFrame {
-    /// BGRA8 pixel data, length = width * height * 4
-    pub data: Vec<u8>,
+    /// Pixel data (shared, read-only), length = width * height * bytes_per_pixel
+    pub data: Arc<[u8]>,
     /// Frame width (pixels)
     pub width: u32,
     /// Frame height (pixels)
@@ -60,7 +61,7 @@ impl CapturedFrame {
         let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
 
         // BGRA → RGBA
-        let mut rgba = self.data.clone();
+        let mut rgba = self.data.to_vec();
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
@@ -135,7 +136,7 @@ impl CapturePipeline {
         // Create reader after start() to let DWM start preparing first frame as early as possible
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-        // Pre-create Staging Texture to avoid ~11ms creation overhead on first read_frame
+        // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback
         let (w, h) = capture.target_size();
         reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
 
@@ -226,7 +227,7 @@ impl CapturePipeline {
         )?;
 
         let output = CapturedFrame {
-            data: processed.data,
+            data: Arc::<[u8]>::from(processed.data),
             width: processed.width,
             height: processed.height,
             timestamp: processed.timestamp,
