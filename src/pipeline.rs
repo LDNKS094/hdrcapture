@@ -17,6 +17,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use crate::capture::wgc::{CaptureTarget, WGCCapture};
 pub use crate::capture::CapturePolicy;
 use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_capture};
+use crate::color::{self, ColorFrame, ColorPixelFormat};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
 
@@ -187,11 +188,22 @@ impl CapturePipeline {
         // Pixel data and dimensions are already in TextureReader.
         self.cached_timestamp = Some(timestamp);
 
+        let processed = color::process_frame(
+            ColorFrame {
+                data,
+                width,
+                height,
+                timestamp,
+                format: ColorPixelFormat::Bgra8,
+            },
+            self._policy,
+        )?;
+
         Ok(CapturedFrame {
-            data,
-            width,
-            height,
-            timestamp,
+            data: processed.data,
+            width: processed.width,
+            height: processed.height,
+            timestamp: processed.timestamp,
         })
     }
 
@@ -206,11 +218,22 @@ impl CapturePipeline {
         if data.is_empty() {
             bail!("No cached frame data available");
         }
+        let processed = color::process_frame(
+            ColorFrame {
+                data,
+                width,
+                height,
+                timestamp,
+                format: ColorPixelFormat::Bgra8,
+            },
+            self._policy,
+        )?;
+
         Ok(CapturedFrame {
-            data,
-            width,
-            height,
-            timestamp,
+            data: processed.data,
+            width: processed.width,
+            height: processed.height,
+            timestamp: processed.timestamp,
         })
     }
 
