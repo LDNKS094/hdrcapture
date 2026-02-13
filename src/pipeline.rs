@@ -23,7 +23,7 @@ use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_captu
 use crate::color::{self, ColorFrame, ColorPixelFormat};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
-use crate::memory::{ElasticBufferPool, PooledBuffer};
+use crate::memory::{ElasticBufferPool, PoolStats, PooledBuffer};
 
 /// One-shot capture source (high-level input before OS handle resolution).
 pub enum CaptureSource<'a> {
@@ -406,6 +406,11 @@ impl CapturePipeline {
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
         let raw = self.read_raw_frame(&frame)?;
         self.process_and_cache(raw)
+    }
+
+    /// Output memory pool stats for diagnostics.
+    pub fn pool_stats(&self) -> PoolStats {
+        self.output_pool.stats()
     }
 }
 

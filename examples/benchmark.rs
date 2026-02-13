@@ -76,6 +76,16 @@ fn format_stats(label: &str, resolution: &str, count: usize, stats: &Stats) -> S
     s
 }
 
+fn format_pool_stats(stats: hdrcapture::memory::PoolStats) -> String {
+    let mut s = String::new();
+    writeln!(s, "  pool total frames: {}", stats.total_frames).unwrap();
+    writeln!(s, "  pool free frames: {}", stats.free_frames).unwrap();
+    writeln!(s, "  pool expand count: {}", stats.expand_count).unwrap();
+    writeln!(s, "  pool shrink count: {}", stats.shrink_count).unwrap();
+    writeln!(s, "  pool reuse rate: {:.2}%", stats.reuse_rate() * 100.0).unwrap();
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Test scenarios
 // ---------------------------------------------------------------------------
@@ -183,12 +193,13 @@ fn bench_streaming(target: &Target, use_capture: bool, report: &mut String) {
     }
 
     let stats = compute_stats(&mut durations);
-    let s = format_stats(
+    let mut s = format_stats(
         &format!("{} streaming {}", label, mode),
         &resolution,
         STREAMING_FRAMES,
         &stats,
     );
+    s.push_str(&format_pool_stats(pipeline.pool_stats()));
     print!("{s}");
     write!(report, "{s}").unwrap();
 }
