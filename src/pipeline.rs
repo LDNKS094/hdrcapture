@@ -12,7 +12,9 @@ use anyhow::{bail, Result};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+};
 
 use crate::capture::wgc::{CaptureTarget, WGCCapture};
 pub use crate::capture::CapturePolicy;
@@ -92,6 +94,14 @@ pub struct CapturePipeline {
 }
 
 impl CapturePipeline {
+    fn color_format(format: DXGI_FORMAT) -> Result<ColorPixelFormat> {
+        match format {
+            DXGI_FORMAT_B8G8R8A8_UNORM => Ok(ColorPixelFormat::Bgra8),
+            DXGI_FORMAT_R16G16B16A16_FLOAT => Ok(ColorPixelFormat::Rgba16f),
+            _ => bail!("Unsupported DXGI_FORMAT for color pipeline: {:?}", format),
+        }
+    }
+
     /// Create capture pipeline by monitor index
     ///
     /// Indices are ordered by system enumeration, not guaranteed that `0` is the primary monitor.
@@ -176,11 +186,12 @@ impl CapturePipeline {
 
         let texture = WGCCapture::frame_to_texture(frame)?;
 
-        let (width, height) = unsafe {
+        let (width, height, format) = unsafe {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut desc);
-            (desc.Width, desc.Height)
+            (desc.Width, desc.Height, desc.Format)
         };
+        let color_format = Self::color_format(format)?;
 
         let data = self.reader.read_texture(&texture)?;
 
@@ -188,13 +199,22 @@ impl CapturePipeline {
         // Pixel data and dimensions are already in TextureReader.
         self.cached_timestamp = Some(timestamp);
 
+        if !color::requires_processing(color_format, self._policy) {
+            return Ok(CapturedFrame {
+                data,
+                width,
+                height,
+                timestamp,
+            });
+        }
+
         let processed = color::process_frame(
             ColorFrame {
                 data,
                 width,
                 height,
                 timestamp,
-                format: ColorPixelFormat::Bgra8,
+                format: color_format,
             },
             self._policy,
         )?;
@@ -214,17 +234,27 @@ impl CapturePipeline {
             .cached_timestamp
             .expect("build_cached_frame called without cached data");
         let (width, height) = self.reader.last_dimensions();
+        let format = Self::color_format(self.reader.last_format())?;
         let data = self.reader.clone_buffer();
         if data.is_empty() {
             bail!("No cached frame data available");
         }
+        if !color::requires_processing(format, self._policy) {
+            return Ok(CapturedFrame {
+                data,
+                width,
+                height,
+                timestamp,
+            });
+        }
+
         let processed = color::process_frame(
             ColorFrame {
                 data,
                 width,
                 height,
                 timestamp,
-                format: ColorPixelFormat::Bgra8,
+                format,
             },
             self._policy,
         )?;

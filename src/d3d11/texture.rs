@@ -97,6 +97,11 @@ impl TextureReader {
         (self.width, self.height)
     }
 
+    /// DXGI format of the last read texture.
+    pub fn last_format(&self) -> DXGI_FORMAT {
+        self.format
+    }
+
     /// Clone the internal pixel buffer.
     ///
     /// The buffer contains data from the last successful `read_texture()` call,

@@ -21,6 +21,15 @@ pub struct ColorFrame {
     pub format: ColorPixelFormat,
 }
 
+/// Whether the frame needs color processing for the selected policy.
+pub fn requires_processing(format: ColorPixelFormat, policy: CapturePolicy) -> bool {
+    match (policy, format) {
+        (CapturePolicy::ForceSdr, _) => false,
+        (CapturePolicy::Auto, ColorPixelFormat::Bgra8) => false,
+        (CapturePolicy::Auto, ColorPixelFormat::Rgba16f) => true,
+    }
+}
+
 /// Unified color-processing entry.
 ///
 /// Current implementation is a no-op pass-through.
