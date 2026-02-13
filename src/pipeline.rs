@@ -40,6 +40,7 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Single frame capture result
+#[derive(Clone)]
 pub struct CapturedFrame {
     /// BGRA8 pixel data, length = width * height * 4
     pub data: Vec<u8>,
@@ -88,9 +89,16 @@ pub struct CapturePipeline {
     /// First call flag. First frame after StartCapture() is naturally fresh,
     /// no drain-discard needed, direct capture saves ~1 VSync.
     first_call: bool,
-    /// Timestamp from the last successful read_frame(), for static-screen fallback.
-    /// Pixel data and dimensions live in TextureReader (persists across calls).
-    cached_timestamp: Option<f64>,
+    /// Last successful processed frame, for static-screen fallback.
+    cached_frame: Option<CapturedFrame>,
+}
+
+struct RawFrame {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    timestamp: f64,
+    format: ColorPixelFormat,
 }
 
 impl CapturePipeline {
@@ -137,7 +145,7 @@ impl CapturePipeline {
             capture,
             reader,
             first_call: true,
-            cached_timestamp: None,
+            cached_frame: None,
         })
     }
 
@@ -176,11 +184,11 @@ impl CapturePipeline {
         })
     }
 
-    /// Extract texture from WGC frame and read back pixel data
-    fn read_frame(
+    /// Extract texture from WGC frame and read back raw pixel data.
+    fn read_raw_frame(
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
-    ) -> Result<CapturedFrame> {
+    ) -> Result<RawFrame> {
         // Extract timestamp (SystemRelativeTime, 100ns precision, converted to seconds)
         let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
 
@@ -195,76 +203,44 @@ impl CapturePipeline {
 
         let data = self.reader.read_texture(&texture)?;
 
-        // Cache timestamp for static-screen fallback.
-        // Pixel data and dimensions are already in TextureReader.
-        self.cached_timestamp = Some(timestamp);
-
-        if !color::requires_processing(color_format, self._policy) {
-            return Ok(CapturedFrame {
-                data,
-                width,
-                height,
-                timestamp,
-            });
-        }
-
-        let processed = color::process_frame(
-            ColorFrame {
-                data,
-                width,
-                height,
-                timestamp,
-                format: color_format,
-            },
-            self._policy,
-        )?;
-
-        Ok(CapturedFrame {
-            data: processed.data,
-            width: processed.width,
-            height: processed.height,
-            timestamp: processed.timestamp,
+        Ok(RawFrame {
+            data,
+            width,
+            height,
+            timestamp,
+            format: color_format,
         })
     }
 
-    /// Build a CapturedFrame from the cached pixel data in TextureReader.
-    /// Only called on the fallback path (static screen, no new frames available).
-    fn build_cached_frame(&self) -> Result<CapturedFrame> {
-        let timestamp = self
-            .cached_timestamp
-            .expect("build_cached_frame called without cached data");
-        let (width, height) = self.reader.last_dimensions();
-        let format = Self::color_format(self.reader.last_format())?;
-        let data = self.reader.clone_buffer();
-        if data.is_empty() {
-            bail!("No cached frame data available");
-        }
-        if !color::requires_processing(format, self._policy) {
-            return Ok(CapturedFrame {
-                data,
-                width,
-                height,
-                timestamp,
-            });
-        }
-
+    /// Run color pipeline once and cache the final output for fallback.
+    fn process_and_cache(&mut self, raw: RawFrame) -> Result<CapturedFrame> {
         let processed = color::process_frame(
             ColorFrame {
-                data,
-                width,
-                height,
-                timestamp,
-                format,
+                data: raw.data,
+                width: raw.width,
+                height: raw.height,
+                timestamp: raw.timestamp,
+                format: raw.format,
             },
             self._policy,
         )?;
 
-        Ok(CapturedFrame {
+        let output = CapturedFrame {
             data: processed.data,
             width: processed.width,
             height: processed.height,
             timestamp: processed.timestamp,
-        })
+        };
+        self.cached_frame = Some(output.clone());
+        Ok(output)
+    }
+
+    /// Build a CapturedFrame from the cached processed output.
+    /// Only called on the fallback path (static screen, no new frames available).
+    fn build_cached_frame(&self) -> Result<CapturedFrame> {
+        self.cached_frame
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No cached frame data available"))
     }
 
     /// Screenshot mode: capture a fresh frame
@@ -279,7 +255,8 @@ impl CapturePipeline {
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-            return self.read_frame(&frame);
+            let raw = self.read_raw_frame(&frame)?;
+            return self.process_and_cache(raw);
         }
 
         // Drain pool, keep last frame as fallback
@@ -291,23 +268,26 @@ impl CapturePipeline {
         // Try to get a fresh frame with short timeout
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
             // New frame arrived — use it (discard fallback if any)
-            return self.read_frame(&fresh);
+            let raw = self.read_raw_frame(&fresh)?;
+            return self.process_and_cache(raw);
         }
 
         // Timeout — screen is likely static
         if let Some(fb) = fallback {
             // Use the last drained frame (most recent available)
-            return self.read_frame(&fb);
+            let raw = self.read_raw_frame(&fb)?;
+            return self.process_and_cache(raw);
         }
 
         // Pool was empty AND no new frame — use cached data
-        if self.cached_timestamp.is_some() {
+        if self.cached_frame.is_some() {
             return self.build_cached_frame();
         }
 
         // No cache either — true cold start edge case, full timeout
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-        self.read_frame(&frame)
+        let raw = self.read_raw_frame(&frame)?;
+        self.process_and_cache(raw)
     }
 
     /// Continuous capture mode: grab latest available frame
@@ -322,7 +302,8 @@ impl CapturePipeline {
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-            return self.read_frame(&frame);
+            let raw = self.read_raw_frame(&frame)?;
+            return self.process_and_cache(raw);
         }
 
         // Drain pool, keep last frame
@@ -333,22 +314,25 @@ impl CapturePipeline {
 
         // Got a buffered frame — use it
         if let Some(f) = latest {
-            return self.read_frame(&f);
+            let raw = self.read_raw_frame(&f)?;
+            return self.process_and_cache(raw);
         }
 
         // Pool empty — try short wait for new frame
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
-            return self.read_frame(&fresh);
+            let raw = self.read_raw_frame(&fresh)?;
+            return self.process_and_cache(raw);
         }
 
         // Timeout — screen is likely static, use cached data
-        if self.cached_timestamp.is_some() {
+        if self.cached_frame.is_some() {
             return self.build_cached_frame();
         }
 
         // No cache — full timeout (should not happen in normal usage)
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-        self.read_frame(&frame)
+        let raw = self.read_raw_frame(&frame)?;
+        self.process_and_cache(raw)
     }
 }
 

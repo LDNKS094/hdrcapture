@@ -92,33 +92,6 @@ impl TextureReader {
         Ok(())
     }
 
-    /// Dimensions of the last read texture.
-    pub fn last_dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    /// DXGI format of the last read texture.
-    pub fn last_format(&self) -> DXGI_FORMAT {
-        self.format
-    }
-
-    /// Clone the internal pixel buffer.
-    ///
-    /// The buffer contains data from the last successful `read_texture()` call,
-    /// with RowPitch padding already stripped. Returns an empty Vec if no frame
-    /// has been read yet.
-    ///
-    /// Only used on the fallback path (static screen), so the clone cost is acceptable.
-    pub fn clone_buffer(&self) -> Vec<u8> {
-        let bpp = bytes_per_pixel(self.format).unwrap_or(4);
-        let expected = self.width as usize * self.height as usize * bpp;
-        if expected > 0 && self.buffer.len() >= expected {
-            self.buffer[..expected].to_vec()
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Read data from GPU texture to CPU
     ///
     /// Returns an owned `Vec<u8>` with RowPitch padding stripped, each row exactly `width * bytes_per_pixel` bytes.
