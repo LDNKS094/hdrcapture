@@ -129,12 +129,19 @@ impl ElasticBufferPool {
             }
         }
 
-        // Defensive fallback (should not happen): allocate one frame immediately.
-        let fallback = vec![0u8; self.frame_bytes];
-        state.alloc_count += 1;
+        // Defensive fallback: append one more group, then take from it.
+        let step = state.current_step();
+        state.append_group(step, self.frame_bytes);
+        let idx = state.groups.len() - 1;
+        let group = &mut state.groups[idx];
+        let data = group
+            .free
+            .pop()
+            .expect("newly appended group must contain free frames");
+        group.borrowed += 1;
         PooledBuffer {
-            data: Some(fallback),
-            group_idx: 0,
+            data: Some(data),
+            group_idx: idx,
             pool: Arc::clone(self),
         }
     }
@@ -263,5 +270,31 @@ mod tests {
         let stats = pool.stats();
         assert!(stats.reuse_rate() >= 0.0);
         assert!(stats.reuse_rate() <= 1.0);
+    }
+
+    #[test]
+    fn test_shrink_after_release_streak() {
+        let pool = ElasticBufferPool::new(1024);
+
+        // Trigger expansion first.
+        let mut bufs = Vec::new();
+        for _ in 0..6 {
+            bufs.push(pool.acquire());
+        }
+        let expanded = pool.stats().total_frames;
+        assert!(expanded > INITIAL_FRAMES);
+
+        // Return all buffers to make expanded group fully free.
+        drop(bufs);
+
+        // Trigger release checks enough times to satisfy shrink streak.
+        for _ in 0..(SHRINK_RELEASE_STREAK + 1) {
+            let b = pool.acquire();
+            drop(b);
+        }
+
+        let stats = pool.stats();
+        assert!(stats.shrink_count >= 1);
+        assert!(stats.total_frames >= INITIAL_FRAMES);
     }
 }

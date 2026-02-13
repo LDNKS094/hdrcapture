@@ -124,6 +124,7 @@ pub struct CapturePipeline {
     capture: WGCCapture,
     reader: TextureReader,
     output_pool: Arc<ElasticBufferPool>,
+    output_frame_bytes: usize,
     /// First call flag. First frame after StartCapture() is naturally fresh,
     /// no drain-discard needed, direct capture saves ~1 VSync.
     first_call: bool,
@@ -176,7 +177,8 @@ impl CapturePipeline {
         // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback
         let (w, h) = capture.target_size();
         reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
-        let output_pool = ElasticBufferPool::new(w as usize * h as usize * 4);
+        let output_frame_bytes = w as usize * h as usize * 4;
+        let output_pool = ElasticBufferPool::new(output_frame_bytes);
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
@@ -184,6 +186,7 @@ impl CapturePipeline {
             capture,
             reader,
             output_pool,
+            output_frame_bytes,
             first_call: true,
             cached_frame: None,
         })
@@ -273,6 +276,14 @@ impl CapturePipeline {
             format: _,
         } = processed;
         let src_len = src.len();
+
+        // Rebuild output pool when processed frame size grows (e.g. format/resolution change).
+        // Existing published frames keep old pool alive via Arc and are recycled independently.
+        if src_len > self.output_frame_bytes {
+            self.output_frame_bytes = src_len;
+            self.output_pool = ElasticBufferPool::new(self.output_frame_bytes);
+        }
+
         let pooled = self.output_pool.acquire();
         let (mut dst_vec, group_idx, pool) = Self::write_into_pooled_buffer(pooled, src, src_len)?;
         dst_vec.truncate(src_len);

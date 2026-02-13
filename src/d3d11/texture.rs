@@ -71,6 +71,8 @@ impl TextureReader {
             MiscFlags: 0,
         };
 
+        // SAFETY: `desc` is fully initialized with valid fields and `self.device` is a live D3D11 device;
+        // CreateTexture2D writes to local `texture` only and returns a COM-owned object on success.
         unsafe {
             let mut texture = None;
             self.device
