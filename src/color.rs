@@ -2,6 +2,7 @@ pub mod tone_map;
 pub mod white_level;
 
 use anyhow::Result;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
 use crate::capture::CapturePolicy;
 
@@ -14,7 +15,7 @@ pub enum ColorPixelFormat {
 
 /// Frame container passed through color pipeline.
 pub struct ColorFrame {
-    pub data: Vec<u8>,
+    pub texture: ID3D11Texture2D,
     pub width: u32,
     pub height: u32,
     pub timestamp: f64,

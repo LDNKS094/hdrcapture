@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -23,7 +24,7 @@ use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_captu
 use crate::color::{self, ColorFrame, ColorPixelFormat};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
-use crate::memory::{ElasticBufferPool, PoolStats, PooledBuffer};
+use crate::memory::{ElasticBufferPool, PoolStats};
 
 /// One-shot capture source (high-level input before OS handle resolution).
 pub enum CaptureSource<'a> {
@@ -133,7 +134,7 @@ pub struct CapturePipeline {
 }
 
 struct RawFrame {
-    data: Vec<u8>,
+    texture: ID3D11Texture2D,
     width: u32,
     height: u32,
     timestamp: f64,
@@ -141,6 +142,14 @@ struct RawFrame {
 }
 
 impl CapturePipeline {
+    fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
+        let bpp = match format {
+            ColorPixelFormat::Bgra8 => 4,
+            ColorPixelFormat::Rgba16f => 8,
+        };
+        width as usize * height as usize * bpp
+    }
+
     fn color_format(format: DXGI_FORMAT) -> Result<ColorPixelFormat> {
         match format {
             DXGI_FORMAT_B8G8R8A8_UNORM => Ok(ColorPixelFormat::Bgra8),
@@ -227,7 +236,7 @@ impl CapturePipeline {
         })
     }
 
-    /// Extract texture from WGC frame and read back raw pixel data.
+    /// Extract texture and metadata from WGC frame.
     fn read_raw_frame(
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
@@ -244,10 +253,8 @@ impl CapturePipeline {
         };
         let color_format = Self::color_format(format)?;
 
-        let data = self.reader.read_texture(&texture)?;
-
         Ok(RawFrame {
-            data,
+            texture,
             width,
             height,
             timestamp,
@@ -259,7 +266,7 @@ impl CapturePipeline {
     fn process_and_cache(&mut self, raw: RawFrame) -> Result<CapturedFrame> {
         let processed = color::process_frame(
             ColorFrame {
-                data: raw.data,
+                texture: raw.texture,
                 width: raw.width,
                 height: raw.height,
                 timestamp: raw.timestamp,
@@ -269,24 +276,27 @@ impl CapturePipeline {
         )?;
 
         let ColorFrame {
-            data: src,
+            texture,
             width,
             height,
             timestamp,
-            format: _,
+            format,
         } = processed;
-        let src_len = src.len();
+        let required_len = Self::frame_bytes(width, height, format);
 
         // Rebuild output pool when processed frame size grows (e.g. format/resolution change).
         // Existing published frames keep old pool alive via Arc and are recycled independently.
-        if src_len > self.output_frame_bytes {
-            self.output_frame_bytes = src_len;
+        if required_len > self.output_frame_bytes {
+            self.output_frame_bytes = required_len;
             self.output_pool = ElasticBufferPool::new(self.output_frame_bytes);
         }
 
-        let pooled = self.output_pool.acquire();
-        let (mut dst_vec, group_idx, pool) = Self::write_into_pooled_buffer(pooled, src, src_len)?;
-        dst_vec.truncate(src_len);
+        let mut pooled = self.output_pool.acquire();
+        let written = self
+            .reader
+            .read_texture_into(&texture, pooled.as_mut_slice())?;
+        let (mut dst_vec, group_idx, pool) = pooled.into_parts();
+        dst_vec.truncate(written);
 
         let output = CapturedFrame {
             data: Arc::new(SharedFrameData {
@@ -300,23 +310,6 @@ impl CapturePipeline {
         };
         self.cached_frame = Some(output.clone());
         Ok(output)
-    }
-
-    fn write_into_pooled_buffer(
-        mut pooled: PooledBuffer,
-        src: Vec<u8>,
-        src_len: usize,
-    ) -> Result<(Vec<u8>, usize, Arc<ElasticBufferPool>)> {
-        let dst = pooled.as_mut_slice();
-        if dst.len() < src_len {
-            bail!(
-                "Output pool frame too small: dst={}, src={}",
-                dst.len(),
-                src_len
-            );
-        }
-        dst[..src_len].copy_from_slice(&src);
-        Ok(pooled.into_parts())
     }
 
     /// Build a CapturedFrame from the cached processed output.

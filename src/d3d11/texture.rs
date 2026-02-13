@@ -96,6 +96,65 @@ impl TextureReader {
 
     /// Read data from GPU texture to CPU
     ///
+    /// Writes row-stripped bytes into caller-provided buffer and returns written byte count.
+    pub fn read_texture_into(
+        &mut self,
+        source_texture: &ID3D11Texture2D,
+        dst: &mut [u8],
+    ) -> Result<usize> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            source_texture.GetDesc(&mut desc);
+        }
+
+        let bpp = bytes_per_pixel(desc.Format)?;
+
+        self.ensure_staging_texture(desc.Width, desc.Height, desc.Format)?;
+        let staging = self.staging_texture.as_ref().unwrap();
+
+        let row_bytes = desc.Width as usize * bpp;
+        let height = desc.Height as usize;
+        let required = row_bytes * height;
+        if dst.len() < required {
+            bail!(
+                "Destination buffer too small: required={}, got={}",
+                required,
+                dst.len()
+            );
+        }
+
+        unsafe {
+            // GPU -> Staging copy
+            self.context.CopyResource(staging, source_texture);
+
+            // Map memory for CPU read access
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("Failed to map staging texture")?;
+
+            let row_pitch = mapped.RowPitch as usize;
+
+            // Copy row by row to destination buffer, stripping RowPitch trailing padding
+            let src = mapped.pData as *const u8;
+            for y in 0..height {
+                // SAFETY: src points to mapped GPU memory, row_pitch * y + row_bytes is within mapped range;
+                //         dst has been validated to hold at least `required` bytes above.
+                std::ptr::copy_nonoverlapping(
+                    src.add(y * row_pitch),
+                    dst.as_mut_ptr().add(y * row_bytes),
+                    row_bytes,
+                );
+            }
+
+            self.context.Unmap(staging, 0);
+        }
+
+        Ok(required)
+    }
+
+    /// Read data from GPU texture to CPU
+    ///
     /// Returns an owned `Vec<u8>` with RowPitch padding stripped, each row exactly `width * bytes_per_pixel` bytes.
     /// Internally reuses scratch buffer to avoid repeated allocations, performs one memcpy to transfer ownership on return.
     pub fn read_texture(&mut self, source_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
@@ -110,7 +169,7 @@ impl TextureReader {
         let staging = self.staging_texture.as_ref().unwrap();
 
         unsafe {
-            // GPU → Staging copy
+            // GPU -> Staging copy
             self.context.CopyResource(staging, source_texture);
 
             // Map memory for CPU read access
