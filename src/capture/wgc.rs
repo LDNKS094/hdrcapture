@@ -1,6 +1,6 @@
 // Windows Graphics Capture core implementation
 //
-// Uniformly uses BGRA8 format for capture, DWM automatically handles HDR→SDR tone mapping.
+// Capture pixel format is selected by policy.
 // Uses FrameArrived event + WaitForSingleObject for zero-latency frame waiting.
 
 use anyhow::{bail, Context, Result};
@@ -12,7 +12,6 @@ use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
-use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Gdi::HMONITOR;
@@ -20,6 +19,7 @@ use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObj
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
+use super::policy::{resolve_pixel_format, CapturePolicy};
 use crate::d3d11::D3D11Context;
 
 // ---------------------------------------------------------------------------
@@ -165,13 +165,17 @@ fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
 
 /// Initialize WGC capture session
 ///
-/// Uniformly uses BGRA8 format, DWM automatically handles HDR→SDR tone mapping.
+/// Uses policy-resolved pixel format to create the frame pool.
 /// Registers FrameArrived event callback, implements zero-latency frame waiting via kernel event.
 ///
 /// # Arguments
 /// * `d3d_ctx` - D3D11 device context
 /// * `target` - Capture target (monitor or window)
-pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGCCapture> {
+pub fn init_capture(
+    d3d_ctx: &D3D11Context,
+    target: CaptureTarget,
+    policy: CapturePolicy,
+) -> Result<WGCCapture> {
     // 1. Create GraphicsCaptureItem based on target type
     let item = match target {
         CaptureTarget::Monitor(monitor) => create_capture_item_for_monitor(monitor)?,
@@ -180,10 +184,11 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
 
     let size = item.Size()?;
 
-    // 2. Create FramePool (fixed BGRA8, DWM auto handles HDR→SDR)
+    // 2. Create FramePool with policy-resolved pixel format.
+    let pixel_format = resolve_pixel_format(policy);
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &d3d_ctx.direct3d_device,
-        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        pixel_format,
         2, // Buffer count
         size,
     )?;

@@ -15,30 +15,10 @@ use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 use crate::capture::wgc::{CaptureTarget, WGCCapture};
+pub use crate::capture::CapturePolicy;
 use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_capture};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
-
-/// Capture policy.
-///
-/// `Auto` is reserved for HDR-aware path selection.
-/// `ForceSdr` keeps the current BGRA8-compatible path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CapturePolicy {
-    #[default]
-    Auto,
-    ForceSdr,
-}
-
-impl From<bool> for CapturePolicy {
-    fn from(force_sdr: bool) -> Self {
-        if force_sdr {
-            Self::ForceSdr
-        } else {
-            Self::Auto
-        }
-    }
-}
 
 /// One-shot capture source (high-level input before OS handle resolution).
 pub enum CaptureSource<'a> {
@@ -131,7 +111,7 @@ impl CapturePipeline {
 
     fn new(target: CaptureTarget, policy: CapturePolicy) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
-        let capture = init_capture(&d3d_ctx, target)?;
+        let capture = init_capture(&d3d_ctx, target, policy)?;
         capture.start()?;
         // Create reader after start() to let DWM start preparing first frame as early as possible
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());

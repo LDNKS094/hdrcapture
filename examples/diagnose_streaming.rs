@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use hdrcapture::capture::wgc::WGCCapture;
-use hdrcapture::capture::{enable_dpi_awareness, find_monitor, init_capture};
+use hdrcapture::capture::{enable_dpi_awareness, find_monitor, init_capture, CapturePolicy};
 use hdrcapture::d3d11::texture::TextureReader;
 use hdrcapture::d3d11::{create_d3d11_device, D3D11Context};
 
@@ -97,6 +97,7 @@ fn run_diagnosis(d3d_ctx: &D3D11Context, fresh: bool) -> String {
     let capture = init_capture(
         d3d_ctx,
         hdrcapture::capture::wgc::CaptureTarget::Monitor(hmonitor),
+        CapturePolicy::Auto,
     )
     .unwrap();
     capture.start().unwrap();
