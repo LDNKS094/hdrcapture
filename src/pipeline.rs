@@ -23,6 +23,7 @@ use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_captu
 use crate::color::{self, ColorFrame, ColorPixelFormat};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
+use crate::memory::{ElasticBufferPool, PooledBuffer};
 
 /// One-shot capture source (high-level input before OS handle resolution).
 pub enum CaptureSource<'a> {
@@ -44,7 +45,7 @@ const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 #[derive(Clone)]
 pub struct CapturedFrame {
     /// Pixel data (shared, read-only), length = width * height * bytes_per_pixel
-    pub data: Arc<[u8]>,
+    pub data: Arc<SharedFrameData>,
     /// Frame width (pixels)
     pub width: u32,
     /// Frame height (pixels)
@@ -61,13 +62,48 @@ impl CapturedFrame {
         let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
 
         // BGRA → RGBA
-        let mut rgba = self.data.to_vec();
+        let mut rgba = self.data.as_slice().to_vec();
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
 
         encoder.write_image(&rgba, self.width, self.height, ExtendedColorType::Rgba8)?;
         Ok(())
+    }
+}
+
+pub struct SharedFrameData {
+    bytes: Vec<u8>,
+    pool: Arc<ElasticBufferPool>,
+    group_idx: usize,
+}
+
+impl SharedFrameData {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl std::ops::Deref for SharedFrameData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl Drop for SharedFrameData {
+    fn drop(&mut self) {
+        let bytes = std::mem::take(&mut self.bytes);
+        self.pool.release_recycled(self.group_idx, bytes);
     }
 }
 
@@ -87,6 +123,7 @@ pub struct CapturePipeline {
     _policy: CapturePolicy,
     capture: WGCCapture,
     reader: TextureReader,
+    output_pool: Arc<ElasticBufferPool>,
     /// First call flag. First frame after StartCapture() is naturally fresh,
     /// no drain-discard needed, direct capture saves ~1 VSync.
     first_call: bool,
@@ -139,12 +176,14 @@ impl CapturePipeline {
         // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback
         let (w, h) = capture.target_size();
         reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let output_pool = ElasticBufferPool::new(w as usize * h as usize * 4);
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
             _policy: policy,
             capture,
             reader,
+            output_pool,
             first_call: true,
             cached_frame: None,
         })
@@ -226,14 +265,47 @@ impl CapturePipeline {
             self._policy,
         )?;
 
+        let ColorFrame {
+            data: src,
+            width,
+            height,
+            timestamp,
+            format: _,
+        } = processed;
+        let src_len = src.len();
+        let pooled = self.output_pool.acquire();
+        let (mut dst_vec, group_idx, pool) = Self::write_into_pooled_buffer(pooled, src, src_len)?;
+        dst_vec.truncate(src_len);
+
         let output = CapturedFrame {
-            data: Arc::<[u8]>::from(processed.data),
-            width: processed.width,
-            height: processed.height,
-            timestamp: processed.timestamp,
+            data: Arc::new(SharedFrameData {
+                bytes: dst_vec,
+                pool,
+                group_idx,
+            }),
+            width,
+            height,
+            timestamp,
         };
         self.cached_frame = Some(output.clone());
         Ok(output)
+    }
+
+    fn write_into_pooled_buffer(
+        mut pooled: PooledBuffer,
+        src: Vec<u8>,
+        src_len: usize,
+    ) -> Result<(Vec<u8>, usize, Arc<ElasticBufferPool>)> {
+        let dst = pooled.as_mut_slice();
+        if dst.len() < src_len {
+            bail!(
+                "Output pool frame too small: dst={}, src={}",
+                dst.len(),
+                src_len
+            );
+        }
+        dst[..src_len].copy_from_slice(&src);
+        Ok(pooled.into_parts())
     }
 
     /// Build a CapturedFrame from the cached processed output.

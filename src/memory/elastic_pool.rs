@@ -17,6 +17,16 @@ pub struct PoolStats {
     pub alloc_count: usize,
 }
 
+impl PoolStats {
+    pub fn reuse_rate(&self) -> f64 {
+        if self.acquire_count == 0 {
+            return 1.0;
+        }
+        let reused = self.acquire_count.saturating_sub(self.alloc_count);
+        reused as f64 / self.acquire_count as f64
+    }
+}
+
 struct Group {
     size: usize,
     borrowed: usize,
@@ -177,6 +187,10 @@ impl ElasticBufferPool {
             state.release_streak = 0;
         }
     }
+
+    pub(crate) fn release_recycled(&self, group_idx: usize, data: Vec<u8>) {
+        self.release_inner(group_idx, data);
+    }
 }
 
 pub struct PooledBuffer {
@@ -196,6 +210,13 @@ impl PooledBuffer {
 
     pub fn into_vec(mut self) -> Vec<u8> {
         self.data.take().unwrap_or_default()
+    }
+
+    pub fn into_parts(mut self) -> (Vec<u8>, usize, Arc<ElasticBufferPool>) {
+        let data = self.data.take().unwrap_or_default();
+        let group_idx = self.group_idx;
+        let pool = Arc::clone(&self.pool);
+        (data, group_idx, pool)
     }
 }
 
@@ -229,5 +250,18 @@ mod tests {
         let stats = pool.stats();
         assert!(stats.total_frames >= INITIAL_FRAMES + SMALL_STEP);
         assert!(stats.expand_count >= 1);
+    }
+
+    #[test]
+    fn test_reuse_rate_is_reasonable() {
+        let pool = ElasticBufferPool::new(1024);
+        {
+            let _a = pool.acquire();
+            let _b = pool.acquire();
+        }
+        let _c = pool.acquire();
+        let stats = pool.stats();
+        assert!(stats.reuse_rate() >= 0.0);
+        assert!(stats.reuse_rate() <= 1.0);
     }
 }
