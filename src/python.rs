@@ -10,7 +10,7 @@
 use std::panic::AssertUnwindSafe;
 
 use numpy::ndarray::Array3;
-use numpy::{IntoPyArray, PyArray3};
+use numpy::{IntoPyArray, PyArray3, PyArrayMethods};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -121,7 +121,12 @@ impl CapturedFrame {
         let w = self.inner.width as usize;
         let array = Array3::from_shape_vec((h, w, 4), self.inner.data.as_ref().to_vec())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(array.into_pyarray(py))
+        let pyarray = array.into_pyarray(py);
+        pyarray
+            .try_readwrite()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .make_nonwriteable();
+        Ok(pyarray)
     }
 }
 
