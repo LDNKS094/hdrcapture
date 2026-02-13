@@ -2,6 +2,7 @@ tests/results/
 docs/dev/
 ref/
 .serena/
+nul
 
 # Rust
 /target/

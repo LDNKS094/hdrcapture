@@ -1,5 +1,6 @@
 // D3D11 device creation and management
 
+pub mod compute;
 pub mod texture;
 
 use anyhow::Context;
