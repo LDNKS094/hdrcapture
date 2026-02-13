@@ -4,7 +4,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 class CapturedFrame:
-    """A single captured frame holding BGRA8 pixel data."""
+    """A single captured frame holding BGRA8 or RGBA16F pixel data."""
 
     @property
     def width(self) -> int:
@@ -21,12 +21,17 @@ class CapturedFrame:
         """Capture timestamp in seconds, relative to system boot."""
         ...
 
+    @property
+    def format(self) -> str:
+        """Pixel format string: 'bgra8' or 'rgba16f'."""
+        ...
+
     def save(self, path: str) -> None:
         """Save as PNG file."""
         ...
 
     def ndarray(self) -> NDArray[np.uint8]:
-        """Convert to numpy array, shape (H, W, 4), dtype uint8, BGRA channel order."""
+        """Convert to numpy array for bgra8 frames, shape (H, W, 4), dtype uint8."""
         ...
 
     def __array__(self, dtype: object = None, copy: object = None) -> NDArray[np.uint8]:

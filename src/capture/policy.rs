@@ -1,5 +1,3 @@
-use windows::Graphics::DirectX::DirectXPixelFormat;
-
 /// Capture policy selected by caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CapturePolicy {
@@ -16,11 +14,4 @@ impl From<bool> for CapturePolicy {
             Self::Auto
         }
     }
-}
-
-/// Decide WGC FramePool pixel format from capture policy.
-///
-/// Current implementation keeps existing behavior: always request BGRA8.
-pub fn resolve_pixel_format(_policy: CapturePolicy) -> DirectXPixelFormat {
-    DirectXPixelFormat::B8G8R8A8UIntNormalized
 }

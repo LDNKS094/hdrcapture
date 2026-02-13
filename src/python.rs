@@ -14,6 +14,7 @@ use numpy::{IntoPyArray, PyArray3, PyArrayMethods};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use crate::color::ColorPixelFormat;
 use crate::pipeline;
 
 /// Release the GIL, execute a pure-Rust closure, then re-acquire the GIL.
@@ -76,6 +77,15 @@ impl CapturedFrame {
         self.inner.timestamp
     }
 
+    /// Pixel format string ("bgra8" or "rgba16f")
+    #[getter]
+    fn format(&self) -> &'static str {
+        match self.inner.format {
+            ColorPixelFormat::Bgra8 => "bgra8",
+            ColorPixelFormat::Rgba16f => "rgba16f",
+        }
+    }
+
     /// Save as image file (format determined by extension, e.g., .png, .bmp, .jpg)
     ///
     /// Rust side directly performs BGRA→RGBA conversion and writes to disk, bypassing Python memory.
@@ -108,8 +118,11 @@ impl CapturedFrame {
 
     fn __repr__(&self) -> String {
         format!(
-            "CapturedFrame({}x{}, timestamp={:.3}s)",
-            self.inner.width, self.inner.height, self.inner.timestamp
+            "CapturedFrame({}x{}, format={}, timestamp={:.3}s)",
+            self.inner.width,
+            self.inner.height,
+            self.format(),
+            self.inner.timestamp
         )
     }
 }
@@ -117,6 +130,11 @@ impl CapturedFrame {
 impl CapturedFrame {
     /// Internal shared numpy conversion logic
     fn to_ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
+        if self.inner.format != ColorPixelFormat::Bgra8 {
+            return Err(PyRuntimeError::new_err(
+                "ndarray() only supports bgra8 frames right now; rgba16f conversion path is pending",
+            ));
+        }
         let h = self.inner.height as usize;
         let w = self.inner.width as usize;
         let array = Array3::from_shape_vec((h, w, 4), self.inner.data.as_slice().to_vec())

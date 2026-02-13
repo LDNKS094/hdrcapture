@@ -12,14 +12,17 @@ use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
+use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
-use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+use windows::Win32::Graphics::Dxgi::IDXGIOutput6;
+use windows::Win32::Graphics::Gdi::{MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
-use super::policy::{resolve_pixel_format, CapturePolicy};
+use super::policy::CapturePolicy;
 use crate::d3d11::D3D11Context;
 
 // ---------------------------------------------------------------------------
@@ -184,8 +187,14 @@ pub fn init_capture(
 
     let size = item.Size()?;
 
-    // 2. Create FramePool with policy-resolved pixel format.
-    let pixel_format = resolve_pixel_format(policy);
+    // 2. Create FramePool format.
+    // OBS rule: force_sdr wins; otherwise follow target monitor HDR state.
+    let is_hdr = target_is_hdr(d3d_ctx, target).unwrap_or(false);
+    let pixel_format = match (policy, is_hdr) {
+        (CapturePolicy::ForceSdr, _) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        (CapturePolicy::Auto, true) => DirectXPixelFormat::R16G16B16A16Float,
+        (CapturePolicy::Auto, false) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+    };
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &d3d_ctx.direct3d_device,
         pixel_format,
@@ -231,4 +240,32 @@ pub fn init_capture(
         target_width: size.Width as u32,
         target_height: size.Height as u32,
     })
+}
+
+fn target_is_hdr(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<bool> {
+    let target_monitor = match target {
+        CaptureTarget::Monitor(hmonitor) => hmonitor,
+        CaptureTarget::Window(hwnd) => unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
+    };
+    if target_monitor.is_invalid() {
+        return Ok(false);
+    }
+
+    let adapter = unsafe { d3d_ctx.dxgi_device.GetAdapter()? };
+
+    let mut i = 0;
+    while let Ok(output) = unsafe { adapter.EnumOutputs(i) } {
+        let desc = unsafe { output.GetDesc()? };
+        if desc.Monitor == target_monitor {
+            let output6: IDXGIOutput6 = match output.cast() {
+                Ok(v) => v,
+                Err(_) => return Ok(false),
+            };
+            let desc1 = unsafe { output6.GetDesc1()? };
+            return Ok(desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        }
+        i += 1;
+    }
+
+    Ok(false)
 }

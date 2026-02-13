@@ -53,11 +53,27 @@ pub struct CapturedFrame {
     pub height: u32,
     /// Frame timestamp (seconds), relative to system boot time (QPC)
     pub timestamp: f64,
+    /// Pixel format of `data`
+    pub format: ColorPixelFormat,
 }
 
 impl CapturedFrame {
+    pub fn bytes_per_pixel(&self) -> usize {
+        match self.format {
+            ColorPixelFormat::Bgra8 => 4,
+            ColorPixelFormat::Rgba16f => 8,
+        }
+    }
+
     /// Save as PNG file (fast compression)
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        if self.format != ColorPixelFormat::Bgra8 {
+            bail!(
+                "Saving {:?} frame is not supported yet; tone-map/export path is pending",
+                self.format
+            );
+        }
+
         let file = std::fs::File::create(path.as_ref())?;
         let writer = std::io::BufWriter::new(file);
         let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
@@ -307,6 +323,7 @@ impl CapturePipeline {
             width,
             height,
             timestamp,
+            format,
         };
         self.cached_frame = Some(output.clone());
         Ok(output)
