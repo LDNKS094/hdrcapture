@@ -52,6 +52,7 @@ anyhow = "1.0"
 image = "0.25"
 pyo3 = "0.28.0"
 numpy = "0.28.0"
+exr = "1.74.0"
 
 [profile.release]
 opt-level = 3

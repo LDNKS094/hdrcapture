@@ -36,6 +36,7 @@ class CapturedFrame:
           - .jpg / .jpeg — JPEG (bgra8 / SDR only)
           - .tiff / .tif — TIFF (bgra8 / SDR only)
           - .jxr — JPEG XR (both bgra8 and rgba16f / HDR)
+          - .exr — OpenEXR (both bgra8 and rgba16f / HDR)
         """
         ...
 

@@ -127,6 +127,7 @@ impl CapturedFrame {
     /// Supported formats:
     ///   - .png .bmp .jpg .tiff — standard formats (BGRA8 / SDR only)
     ///   - .jxr — JPEG XR (both BGRA8 and RGBA16F / HDR)
+    ///   - .exr — OpenEXR (both BGRA8 and RGBA16F / HDR)
     ///
     /// Releases GIL during encoding, doesn't block other Python threads.
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
