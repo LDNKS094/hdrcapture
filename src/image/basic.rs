@@ -64,12 +64,23 @@ pub fn save(path: &Path, data: &[u8], width: u32, height: u32, format: ColorPixe
                 PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
             encoder.write_image(&rgba, width, height, ExtendedColorType::Rgba8)?;
         }
+        SdrFormat::Jpeg => {
+            // JPEG doesn't support alpha; strip to RGB
+            let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| &px[..3]).copied().collect();
+            image::write_buffer_with_format(
+                &mut writer,
+                &rgb,
+                width,
+                height,
+                ExtendedColorType::Rgb8,
+                ImageFormat::Jpeg,
+            )?;
+        }
         _ => {
             let img_fmt = match sdr_fmt {
                 SdrFormat::Bmp => ImageFormat::Bmp,
-                SdrFormat::Jpeg => ImageFormat::Jpeg,
                 SdrFormat::Tiff => ImageFormat::Tiff,
-                SdrFormat::Png => unreachable!(),
+                SdrFormat::Png | SdrFormat::Jpeg => unreachable!(),
             };
             image::write_buffer_with_format(
                 &mut writer,

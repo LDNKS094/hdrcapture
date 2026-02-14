@@ -86,7 +86,14 @@ void main(uint3 id : SV_DispatchThreadID)
     // 4. Gamut: Rec.2020 -> Rec.709
     rgba.rgb = rec2020_to_rec709(rgba.rgb);
 
-    // 5. Clamp and write (D3D11 handles BGRA channel mapping automatically)
+    // 5. Linear -> sRGB gamma encode
+    //    OBS relies on hardware sRGB render target for this step;
+    //    we use a plain UNORM UAV, so encode explicitly.
     rgba.rgb = saturate(rgba.rgb);
+    rgba.rgb = float3(
+        srgb_linear_to_nonlinear_channel(rgba.rgb.r),
+        srgb_linear_to_nonlinear_channel(rgba.rgb.g),
+        srgb_linear_to_nonlinear_channel(rgba.rgb.b));
+
     OutputTexture[id.xy] = rgba;
 }

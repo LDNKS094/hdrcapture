@@ -50,7 +50,7 @@ class CapturedFrame:
 
     def __repr__(self) -> str: ...
 
-class Capture:
+class capture:
     """Reusable screen/window capture pipeline.
 
     Not thread-safe. Each instance must only be used from the thread that created it.
@@ -59,7 +59,7 @@ class Capture:
     @staticmethod
     def monitor(
         index: int = 0, mode: Literal["auto", "hdr", "sdr"] = "auto"
-    ) -> "Capture":
+    ) -> "capture":
         """Create a capture pipeline for a monitor by index."""
         ...
 
@@ -68,7 +68,7 @@ class Capture:
         process_name: str,
         index: int | None = None,
         mode: Literal["auto", "hdr", "sdr"] = "auto",
-    ) -> "Capture":
+    ) -> "capture":
         """Create a capture pipeline for a window by process name."""
         ...
 
@@ -84,7 +84,7 @@ class Capture:
         """Release capture resources."""
         ...
 
-    def __enter__(self) -> "Capture": ...
+    def __enter__(self) -> "capture": ...
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool: ...
     def __repr__(self) -> str: ...
 

@@ -195,13 +195,13 @@ impl CapturedFrame {
 /// Screen/window capture pipeline
 ///
 /// Construct via class methods:
-///   cap = Capture.monitor(0)
-///   cap = Capture.window("notepad.exe")
+///   cap = capture.monitor(0)
+///   cap = capture.window("notepad.exe")
 ///
 /// Supports context manager:
-///   with Capture.monitor(0) as cap:
+///   with capture.monitor(0) as cap:
 ///       frame = cap.capture()
-#[pyclass(unsendable)]
+#[pyclass(unsendable, name = "capture")]
 struct Capture {
     pipeline: Option<pipeline::CapturePipeline>,
 }
@@ -314,7 +314,7 @@ impl Capture {
 /// One-liner screenshot: capture monitor or window
 ///
 /// Internally creates and destroys pipeline, cold start ~79ms.
-/// For multiple screenshots, use Capture class to reuse the pipeline.
+/// For multiple screenshots, use capture class to reuse the pipeline.
 ///
 /// Args:
 ///     monitor: Monitor index, defaults to 0

@@ -1,5 +1,6 @@
 """hdrcapture Python API functional verification + timing stats"""
 
+import os
 import time
 import hdrcapture
 import numpy as np
@@ -17,11 +18,22 @@ def timed(label, fn):
 def main():
     print("=== Functional Verification ===\n")
 
-    # 1. screenshot (cold start)
-    print("[1] screenshot()")
+    # 1. screenshot (cold start) + multi-format save
+    print("[1] screenshot() + multi-format save")
     frame = timed("cold start", lambda: hdrcapture.screenshot())
     print(f"  {repr(frame)}")
-    timed("save png", lambda: frame.save("tests/results/test_screenshot.png"))
+    formats = {
+        "png": "tests/results/test_screenshot.png",
+        "bmp": "tests/results/test_screenshot.bmp",
+        "jpg": "tests/results/test_screenshot.jpg",
+        "tiff": "tests/results/test_screenshot.tiff",
+        "jxr": "tests/results/test_screenshot.jxr",
+        "exr": "tests/results/test_screenshot.exr",
+    }
+    for fmt, path in formats.items():
+        timed(f"save {fmt}", lambda p=path: frame.save(p))
+        size = os.path.getsize(path)
+        print(f"    {fmt}: {size} bytes")
 
     # 2. numpy conversion
     print("\n[2] numpy conversion")
@@ -32,7 +44,7 @@ def main():
 
     # 3. Capture class — capture + grab
     print("\n[3] Capture class")
-    cap = timed("Capture.monitor(0)", lambda: hdrcapture.Capture.monitor(0))
+    cap = timed("Capture.monitor(0)", lambda: hdrcapture.capture.monitor(0))
     f1 = timed("capture()", lambda: cap.capture())
     f2 = timed("grab()", lambda: cap.grab())
     f3 = timed("grab()", lambda: cap.grab())
@@ -43,7 +55,7 @@ def main():
 
     # 4. context manager
     print("\n[4] context manager")
-    with hdrcapture.Capture.monitor(0) as cap2:
+    with hdrcapture.capture.monitor(0) as cap2:
         f = timed("capture()", lambda: cap2.capture())
         print(f"  {repr(f)}")
     # cap2 should be closed now
@@ -55,7 +67,7 @@ def main():
 
     # 5. Continuous capture performance
     print("\n[5] Continuous capture performance (20 rounds)")
-    cap3 = hdrcapture.Capture.monitor(0)
+    cap3 = hdrcapture.capture.monitor(0)
     _ = cap3.grab()  # warm up
 
     times = []

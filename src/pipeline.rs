@@ -448,4 +448,9 @@ impl CapturePipeline {
     pub fn is_hdr(&self) -> bool {
         self.target_hdr
     }
+
+    /// Buffer pool statistics (for diagnostics / benchmarks).
+    pub fn pool_stats(&self) -> crate::memory::PoolStats {
+        self.output_pool.stats()
+    }
 }
