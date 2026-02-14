@@ -1,6 +1,6 @@
 // Windows Graphics Capture core implementation
 //
-// Uniformly uses BGRA8 format for capture, DWM automatically handles HDR→SDR tone mapping.
+// Capture pixel format is selected by policy.
 // Uses FrameArrived event + WaitForSingleObject for zero-latency frame waiting.
 
 use anyhow::{bail, Context, Result};
@@ -15,11 +15,14 @@ use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
-use windows::Win32::Graphics::Gdi::HMONITOR;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+use windows::Win32::Graphics::Dxgi::IDXGIOutput6;
+use windows::Win32::Graphics::Gdi::{MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
+use super::policy::CapturePolicy;
 use crate::d3d11::D3D11Context;
 
 // ---------------------------------------------------------------------------
@@ -54,6 +57,8 @@ pub struct WGCCapture {
     /// Initial size of capture target (for pre-creating Staging Texture)
     target_width: u32,
     target_height: u32,
+    /// Whether the target monitor has HDR enabled (detected once at init)
+    target_hdr: bool,
 }
 
 impl WGCCapture {
@@ -66,6 +71,11 @@ impl WGCCapture {
     /// Initial size of capture target
     pub fn target_size(&self) -> (u32, u32) {
         (self.target_width, self.target_height)
+    }
+
+    /// Whether the target monitor has HDR enabled.
+    pub fn is_hdr(&self) -> bool {
+        self.target_hdr
     }
 
     /// Try to get a frame from FramePool (non-blocking)
@@ -165,13 +175,17 @@ fn create_capture_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
 
 /// Initialize WGC capture session
 ///
-/// Uniformly uses BGRA8 format, DWM automatically handles HDR→SDR tone mapping.
+/// Uses policy-resolved pixel format to create the frame pool.
 /// Registers FrameArrived event callback, implements zero-latency frame waiting via kernel event.
 ///
 /// # Arguments
 /// * `d3d_ctx` - D3D11 device context
 /// * `target` - Capture target (monitor or window)
-pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGCCapture> {
+pub fn init_capture(
+    d3d_ctx: &D3D11Context,
+    target: CaptureTarget,
+    policy: CapturePolicy,
+) -> Result<WGCCapture> {
     // 1. Create GraphicsCaptureItem based on target type
     let item = match target {
         CaptureTarget::Monitor(monitor) => create_capture_item_for_monitor(monitor)?,
@@ -180,10 +194,19 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
 
     let size = item.Size()?;
 
-    // 2. Create FramePool (fixed BGRA8, DWM auto handles HDR→SDR)
+    // 2. Create FramePool format.
+    // Sdr: always BGRA8. Hdr: always R16G16B16A16_FLOAT.
+    // Auto: follow target monitor HDR state.
+    let is_hdr = target_is_hdr(d3d_ctx, target).unwrap_or(false);
+    let pixel_format = match (policy, is_hdr) {
+        (CapturePolicy::Sdr, _) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        (CapturePolicy::Hdr, _) => DirectXPixelFormat::R16G16B16A16Float,
+        (CapturePolicy::Auto, true) => DirectXPixelFormat::R16G16B16A16Float,
+        (CapturePolicy::Auto, false) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+    };
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &d3d_ctx.direct3d_device,
-        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        pixel_format,
         2, // Buffer count
         size,
     )?;
@@ -225,5 +248,34 @@ pub fn init_capture(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<WGC
         shutting_down,
         target_width: size.Width as u32,
         target_height: size.Height as u32,
+        target_hdr: is_hdr,
     })
+}
+
+fn target_is_hdr(d3d_ctx: &D3D11Context, target: CaptureTarget) -> Result<bool> {
+    let target_monitor = match target {
+        CaptureTarget::Monitor(hmonitor) => hmonitor,
+        CaptureTarget::Window(hwnd) => unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
+    };
+    if target_monitor.is_invalid() {
+        return Ok(false);
+    }
+
+    let adapter = unsafe { d3d_ctx.dxgi_device.GetAdapter()? };
+
+    let mut i = 0;
+    while let Ok(output) = unsafe { adapter.EnumOutputs(i) } {
+        let desc = unsafe { output.GetDesc()? };
+        if desc.Monitor == target_monitor {
+            let output6: IDXGIOutput6 = match output.cast() {
+                Ok(v) => v,
+                Err(_) => return Ok(false),
+            };
+            let desc1 = unsafe { output6.GetDesc1()? };
+            return Ok(desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        }
+        i += 1;
+    }
+
+    Ok(false)
 }

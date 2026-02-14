@@ -9,28 +9,37 @@
 
 use std::panic::AssertUnwindSafe;
 
+use half::f16;
 use numpy::ndarray::Array3;
-use numpy::{IntoPyArray, PyArray3};
+use numpy::{IntoPyArray, PyArrayMethods};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use crate::color::ColorPixelFormat;
 use crate::pipeline;
 
 /// Release the GIL, execute a pure-Rust closure, then re-acquire the GIL.
 ///
-/// Equivalent to `py.detach()` but bypasses the `Ungil` (Send) bound.
-/// `CapturePipeline` holds Win32 HANDLE and COM pointers (not Send),
-/// but `Capture` is marked `unsendable`, guaranteeing single-thread usage.
+/// Bypasses pyo3's `Ungil` (Send) bound because `CapturePipeline` holds
+/// Win32 HANDLE and COM pointers that are not Send. This is safe because
+/// `Capture` is `#[pyclass(unsendable)]`, guaranteeing single-thread usage,
+/// and the closure executes synchronously — no non-Send types cross threads.
 ///
-/// Panics inside the closure are caught and converted to Python RuntimeError,
-/// ensuring the GIL is always restored.
+/// Panics inside the closure are caught via `catch_unwind` and converted to
+/// Python `RuntimeError`, ensuring the GIL is always restored regardless of
+/// whether the closure succeeds, fails, or panics.
 fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
-    // SAFETY: We release the GIL and re-acquire it on the same thread.
-    // The closure executes synchronously; no non-Send types cross threads.
+    // Keep `py` in scope so the borrow checker proves we hold the GIL token
+    // at both SaveThread and RestoreThread call sites.
+    let _py = py;
+
+    // SAFETY: SaveThread releases the GIL on the current thread.
+    // RestoreThread re-acquires it on the same thread unconditionally,
+    // even if the closure panicked (catch_unwind guarantees we reach it).
     let save = unsafe { pyo3::ffi::PyEval_SaveThread() };
     let result = std::panic::catch_unwind(AssertUnwindSafe(f));
     unsafe { pyo3::ffi::PyEval_RestoreThread(save) };
-    let _ = py;
+
     result.map_err(|panic| {
         let msg = if let Some(s) = panic.downcast_ref::<&str>() {
             format!("internal error: {}", s)
@@ -41,6 +50,42 @@ fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
         };
         PyRuntimeError::new_err(msg)
     })
+}
+
+/// Parse a Python mode string into CapturePolicy.
+fn parse_mode(mode: &str) -> PyResult<pipeline::CapturePolicy> {
+    pipeline::CapturePolicy::from_mode(mode).ok_or_else(|| {
+        PyRuntimeError::new_err(format!(
+            "invalid mode '{}': expected 'auto', 'hdr', or 'sdr'",
+            mode
+        ))
+    })
+}
+
+/// Emit a Python `UserWarning` when the requested mode doesn't match the monitor's HDR state.
+/// Does nothing for `auto` mode (it adapts automatically).
+fn warn_mode_mismatch(
+    py: Python<'_>,
+    policy: pipeline::CapturePolicy,
+    is_hdr: bool,
+) -> PyResult<()> {
+    let msg = match (policy, is_hdr) {
+        (pipeline::CapturePolicy::Hdr, false) => Some(
+            "mode='hdr' requested but the target monitor is SDR; \
+             capture will proceed but output will not contain real HDR data",
+        ),
+        (pipeline::CapturePolicy::Sdr, true) => Some(
+            "mode='sdr' requested but the target monitor is HDR; \
+             HDR content will be clipped to SDR range without tone-mapping",
+        ),
+        _ => None,
+    };
+
+    if let Some(msg) = msg {
+        let warnings = py.import("warnings")?;
+        warnings.call_method1("warn", (msg,))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -76,9 +121,22 @@ impl CapturedFrame {
         self.inner.timestamp
     }
 
-    /// Save as image file (format determined by extension, e.g., .png, .bmp, .jpg)
+    /// Pixel format string ("bgra8" or "rgba16f")
+    #[getter]
+    fn format(&self) -> &'static str {
+        match self.inner.format {
+            ColorPixelFormat::Bgra8 => "bgra8",
+            ColorPixelFormat::Rgba16f => "rgba16f",
+        }
+    }
+
+    /// Save frame to file (format determined by extension).
     ///
-    /// Rust side directly performs BGRA→RGBA conversion and writes to disk, bypassing Python memory.
+    /// Supported formats:
+    ///   - .png .bmp .jpg .tiff — standard formats (BGRA8 / SDR only)
+    ///   - .jxr — JPEG XR (both BGRA8 and RGBA16F / HDR)
+    ///   - .exr — OpenEXR (both BGRA8 and RGBA16F / HDR)
+    ///
     /// Releases GIL during encoding, doesn't block other Python threads.
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = &self.inner;
@@ -86,11 +144,13 @@ impl CapturedFrame {
         detach_gil(py, || inner.save(&path))?.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Convert to ndarray
+    /// Convert to numpy array.
     ///
     /// Returns:
-    ///     numpy.ndarray: shape (H, W, 4), dtype uint8, BGRA channel order
-    fn ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
+    ///     numpy.ndarray: shape (H, W, 4).
+    ///       - bgra8: dtype uint8, BGRA channel order
+    ///       - rgba16f: dtype float16, RGBA channel order
+    fn ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.to_ndarray(py)
     }
 
@@ -101,27 +161,59 @@ impl CapturedFrame {
         py: Python<'py>,
         dtype: Option<Bound<'py, PyAny>>,
         copy: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let _ = (dtype, copy);
         self.to_ndarray(py)
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "CapturedFrame({}x{}, timestamp={:.3}s)",
-            self.inner.width, self.inner.height, self.inner.timestamp
+            "CapturedFrame({}x{}, format={}, timestamp={:.3}s)",
+            self.inner.width,
+            self.inner.height,
+            self.format(),
+            self.inner.timestamp
         )
     }
 }
 
 impl CapturedFrame {
-    /// Internal shared numpy conversion logic
-    fn to_ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
+    /// Internal shared numpy conversion logic.
+    ///
+    /// - bgra8 → (H, W, 4) uint8
+    /// - rgba16f → (H, W, 4) float16
+    fn to_ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let h = self.inner.height as usize;
         let w = self.inner.width as usize;
-        let array = Array3::from_shape_vec((h, w, 4), self.inner.data.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(array.into_pyarray(py))
+        let data = self.inner.data.as_slice();
+
+        match self.inner.format {
+            ColorPixelFormat::Bgra8 => {
+                let array = Array3::from_shape_vec((h, w, 4), data.to_vec())
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let pyarray = array.into_pyarray(py);
+                pyarray
+                    .try_readwrite()
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .make_nonwriteable();
+                Ok(pyarray.into_any())
+            }
+            ColorPixelFormat::Rgba16f => {
+                // SAFETY: f16 is #[repr(transparent)] over u16 (2 bytes).
+                // data length is guaranteed to be h * w * 8 by the capture pipeline.
+                let f16_slice: &[f16] = unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const f16, data.len() / 2)
+                };
+                let array = Array3::from_shape_vec((h, w, 4), f16_slice.to_vec())
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let pyarray = array.into_pyarray(py);
+                pyarray
+                    .try_readwrite()
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .make_nonwriteable();
+                Ok(pyarray.into_any())
+            }
+        }
     }
 }
 
@@ -132,13 +224,13 @@ impl CapturedFrame {
 /// Screen/window capture pipeline
 ///
 /// Construct via class methods:
-///   cap = Capture.monitor(0)
-///   cap = Capture.window("notepad.exe")
+///   cap = capture.monitor(0)
+///   cap = capture.window("notepad.exe")
 ///
 /// Supports context manager:
-///   with Capture.monitor(0) as cap:
+///   with capture.monitor(0) as cap:
 ///       frame = cap.capture()
-#[pyclass(unsendable)]
+#[pyclass(unsendable, name = "capture")]
 struct Capture {
     pipeline: Option<pipeline::CapturePipeline>,
 }
@@ -158,11 +250,14 @@ impl Capture {
     ///
     /// Args:
     ///     index: Monitor index, defaults to 0
+    ///     mode: Capture mode — "auto", "hdr", or "sdr"
     #[staticmethod]
-    #[pyo3(signature = (index=0))]
-    fn monitor(index: usize) -> PyResult<Self> {
-        let pipeline = pipeline::CapturePipeline::monitor(index)
+    #[pyo3(signature = (index=0, mode="auto"))]
+    fn monitor(py: Python<'_>, index: usize, mode: &str) -> PyResult<Self> {
+        let policy = parse_mode(mode)?;
+        let pipeline = pipeline::CapturePipeline::monitor(index, policy)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
         Ok(Self {
             pipeline: Some(pipeline),
         })
@@ -173,14 +268,30 @@ impl Capture {
     /// Args:
     ///     process_name: Process name (e.g., "notepad.exe")
     ///     index: Window index for processes with the same name, defaults to 0
+    ///     mode: Capture mode — "auto", "hdr", or "sdr"
     #[staticmethod]
-    #[pyo3(signature = (process_name, index=None))]
-    fn window(process_name: &str, index: Option<usize>) -> PyResult<Self> {
-        let pipeline = pipeline::CapturePipeline::window(process_name, index)
+    #[pyo3(signature = (process_name, index=None, mode="auto"))]
+    fn window(
+        py: Python<'_>,
+        process_name: &str,
+        index: Option<usize>,
+        mode: &str,
+    ) -> PyResult<Self> {
+        let policy = parse_mode(mode)?;
+        let pipeline = pipeline::CapturePipeline::window(process_name, index, policy)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
         Ok(Self {
             pipeline: Some(pipeline),
         })
+    }
+
+    /// Whether the target monitor has HDR enabled.
+    #[getter]
+    fn is_hdr(&self) -> PyResult<bool> {
+        let p = self.pipeline.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))?;
+        Ok(p.is_hdr())
     }
 
     /// Screenshot mode: capture a fresh frame
@@ -240,28 +351,40 @@ impl Capture {
 /// One-liner screenshot: capture monitor or window
 ///
 /// Internally creates and destroys pipeline, cold start ~79ms.
-/// For multiple screenshots, use Capture class to reuse the pipeline.
+/// For multiple screenshots, use capture class to reuse the pipeline.
 ///
 /// Args:
 ///     monitor: Monitor index, defaults to 0
 ///     window: Process name for window capture (e.g., "notepad.exe")
 ///     window_index: Window index for processes with the same name, defaults to 0
+///     mode: Capture mode — "auto", "hdr", or "sdr"
 ///
 /// Returns:
 ///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
-#[pyo3(signature = (monitor=0, window=None, window_index=None))]
+#[pyo3(signature = (monitor=0, window=None, window_index=None, mode="auto"))]
 fn screenshot(
     py: Python<'_>,
     monitor: usize,
     window: Option<&str>,
     window_index: Option<usize>,
+    mode: &str,
 ) -> PyResult<CapturedFrame> {
-    let frame = detach_gil(py, || match window {
-        Some(process_name) => pipeline::screenshot_window(process_name, window_index),
-        None => pipeline::screenshot(monitor),
+    let policy = parse_mode(mode)?;
+
+    // Create pipeline (releases GIL during D3D11/WGC init)
+    let mut pipe = detach_gil(py, || match window {
+        Some(process_name) => pipeline::CapturePipeline::window(process_name, window_index, policy),
+        None => pipeline::CapturePipeline::monitor(monitor, policy),
     })?
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    // Warn on mode/HDR mismatch (needs GIL for Python warnings)
+    warn_mode_mismatch(py, policy, pipe.is_hdr())?;
+
+    // Capture frame (releases GIL during wait + readback)
+    let frame =
+        detach_gil(py, || pipe.capture())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(CapturedFrame { inner: frame })
 }
 

@@ -12,7 +12,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::time::Instant;
 
-use hdrcapture::pipeline::CapturePipeline;
+use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -76,6 +76,16 @@ fn format_stats(label: &str, resolution: &str, count: usize, stats: &Stats) -> S
     s
 }
 
+fn format_pool_stats(stats: hdrcapture::memory::PoolStats) -> String {
+    let mut s = String::new();
+    writeln!(s, "  pool total frames: {}", stats.total_frames).unwrap();
+    writeln!(s, "  pool free frames: {}", stats.free_frames).unwrap();
+    writeln!(s, "  pool expand count: {}", stats.expand_count).unwrap();
+    writeln!(s, "  pool shrink count: {}", stats.shrink_count).unwrap();
+    writeln!(s, "  pool reuse rate: {:.2}%", stats.reuse_rate() * 100.0).unwrap();
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Test scenarios
 // ---------------------------------------------------------------------------
@@ -87,10 +97,11 @@ enum Target {
 
 fn create_pipeline(target: &Target) -> Option<CapturePipeline> {
     match target {
-        Target::Monitor(idx) => {
-            Some(CapturePipeline::monitor(*idx).expect("Failed to create monitor pipeline"))
-        }
-        Target::Window(name) => CapturePipeline::window(name, Some(0)).ok(),
+        Target::Monitor(idx) => Some(
+            CapturePipeline::monitor(*idx, CapturePolicy::Auto)
+                .expect("Failed to create monitor pipeline"),
+        ),
+        Target::Window(name) => CapturePipeline::window(name, Some(0), CapturePolicy::Auto).ok(),
     }
 }
 
@@ -182,12 +193,13 @@ fn bench_streaming(target: &Target, use_capture: bool, report: &mut String) {
     }
 
     let stats = compute_stats(&mut durations);
-    let s = format_stats(
+    let mut s = format_stats(
         &format!("{} streaming {}", label, mode),
         &resolution,
         STREAMING_FRAMES,
         &stats,
     );
+    s.push_str(&format_pool_stats(pipeline.pool_stats()));
     print!("{s}");
     write!(report, "{s}").unwrap();
 }

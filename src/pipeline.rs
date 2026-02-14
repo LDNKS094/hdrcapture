@@ -5,19 +5,26 @@
 // - grab(): drain backlog and take last frame, suitable for continuous capture (lower latency)
 // Frame lifetime covers CopyResource, ensuring DWM won't overwrite the surface being read.
 
+use std::marker::PhantomData;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ExtendedColorType, ImageEncoder};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+};
 
 use crate::capture::wgc::{CaptureTarget, WGCCapture};
+pub use crate::capture::CapturePolicy;
 use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_capture};
+use crate::color::white_level;
+use crate::color::{self, ColorFrame, ColorPixelFormat, ToneMapPass};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
+use crate::memory::ElasticBufferPool;
 
 /// First frame wait timeout
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
@@ -27,32 +34,76 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Single frame capture result
+#[derive(Clone)]
 pub struct CapturedFrame {
-    /// BGRA8 pixel data, length = width * height * 4
-    pub data: Vec<u8>,
+    /// Pixel data (shared, read-only), length = width * height * bytes_per_pixel
+    pub data: Arc<SharedFrameData>,
     /// Frame width (pixels)
     pub width: u32,
     /// Frame height (pixels)
     pub height: u32,
     /// Frame timestamp (seconds), relative to system boot time (QPC)
     pub timestamp: f64,
+    /// Pixel format of `data`
+    pub format: ColorPixelFormat,
 }
 
 impl CapturedFrame {
-    /// Save as PNG file (fast compression)
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let file = std::fs::File::create(path.as_ref())?;
-        let writer = std::io::BufWriter::new(file);
-        let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
-
-        // BGRA → RGBA
-        let mut rgba = self.data.clone();
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
+    pub fn bytes_per_pixel(&self) -> usize {
+        match self.format {
+            ColorPixelFormat::Bgra8 => 4,
+            ColorPixelFormat::Rgba16f => 8,
         }
+    }
 
-        encoder.write_image(&rgba, self.width, self.height, ExtendedColorType::Rgba8)?;
-        Ok(())
+    /// Save frame to file.
+    ///
+    /// Format is determined by file extension:
+    /// - `.png` `.bmp` `.jpg` `.tiff` — standard formats (BGRA8 only)
+    /// - `.jxr` — JPEG XR (both BGRA8 and RGBA16F)
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        crate::image::save(
+            path.as_ref(),
+            self.data.as_slice(),
+            self.width,
+            self.height,
+            self.format,
+        )
+    }
+}
+
+pub struct SharedFrameData {
+    bytes: Vec<u8>,
+    pool: Arc<ElasticBufferPool>,
+    group_idx: usize,
+}
+
+impl SharedFrameData {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl std::ops::Deref for SharedFrameData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl Drop for SharedFrameData {
+    fn drop(&mut self) {
+        let bytes = std::mem::take(&mut self.bytes);
+        self.pool.release_recycled(self.group_idx, bytes);
     }
 }
 
@@ -62,59 +113,125 @@ impl CapturedFrame {
 ///
 /// # Examples
 /// ```no_run
-/// # use hdrcapture::pipeline::CapturePipeline;
-/// let mut pipeline = CapturePipeline::monitor(0).unwrap();
+/// # use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
+/// let mut pipeline = CapturePipeline::monitor(0, CapturePolicy::Auto).unwrap();
 /// let frame = pipeline.capture().unwrap();
 /// println!("{}x{}, {} bytes", frame.width, frame.height, frame.data.len());
 /// ```
 pub struct CapturePipeline {
     _d3d_ctx: D3D11Context,
+    policy: CapturePolicy,
     capture: WGCCapture,
     reader: TextureReader,
+    output_pool: Arc<ElasticBufferPool>,
+    output_frame_bytes: usize,
     /// First call flag. First frame after StartCapture() is naturally fresh,
     /// no drain-discard needed, direct capture saves ~1 VSync.
     first_call: bool,
-    /// Timestamp from the last successful read_frame(), for static-screen fallback.
-    /// Pixel data and dimensions live in TextureReader (persists across calls).
-    cached_timestamp: Option<f64>,
+    /// Last successful processed frame, for static-screen fallback.
+    cached_frame: Option<CapturedFrame>,
+    /// GPU tone-map pass (Some when Auto policy may produce Rgba16f).
+    tone_map_pass: Option<ToneMapPass>,
+    /// SDR white level in nits, queried at pipeline creation.
+    sdr_white_nits: f32,
+    /// Whether the target monitor has HDR enabled (detected once at init).
+    target_hdr: bool,
+    /// Prevent Send + Sync: pipeline holds thread-affine COM resources
+    /// (ID3D11DeviceContext) that must not cross thread boundaries.
+    _not_send_sync: PhantomData<*const ()>,
+}
+
+struct RawFrame {
+    texture: ID3D11Texture2D,
+    width: u32,
+    height: u32,
+    timestamp: f64,
+    format: ColorPixelFormat,
 }
 
 impl CapturePipeline {
+    fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
+        let bpp = match format {
+            ColorPixelFormat::Bgra8 => 4,
+            ColorPixelFormat::Rgba16f => 8,
+        };
+        width as usize * height as usize * bpp
+    }
+
+    fn color_format(format: DXGI_FORMAT) -> Result<ColorPixelFormat> {
+        match format {
+            DXGI_FORMAT_B8G8R8A8_UNORM => Ok(ColorPixelFormat::Bgra8),
+            DXGI_FORMAT_R16G16B16A16_FLOAT => Ok(ColorPixelFormat::Rgba16f),
+            _ => bail!("Unsupported DXGI_FORMAT for color pipeline: {:?}", format),
+        }
+    }
+
     /// Create capture pipeline by monitor index
     ///
     /// Indices are ordered by system enumeration, not guaranteed that `0` is the primary monitor.
-    pub fn monitor(index: usize) -> Result<Self> {
+    pub fn monitor(index: usize, policy: CapturePolicy) -> Result<Self> {
         enable_dpi_awareness();
         let hmonitor = find_monitor(index)?;
-        Self::new(CaptureTarget::Monitor(hmonitor))
+        let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
+        Self::new(CaptureTarget::Monitor(hmonitor), policy, sdr_white_nits)
     }
 
     /// Create window capture pipeline by process name
     ///
     /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
-    pub fn window(process_name: &str, index: Option<usize>) -> Result<Self> {
+    pub fn window(process_name: &str, index: Option<usize>, policy: CapturePolicy) -> Result<Self> {
         enable_dpi_awareness();
         let hwnd = find_window(process_name, index)?;
-        Self::new(CaptureTarget::Window(hwnd))
+        let hmonitor = unsafe {
+            windows::Win32::Graphics::Gdi::MonitorFromWindow(
+                hwnd,
+                windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
+            )
+        };
+        let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
+        Self::new(CaptureTarget::Window(hwnd), policy, sdr_white_nits)
     }
 
-    fn new(target: CaptureTarget) -> Result<Self> {
+    fn new(target: CaptureTarget, policy: CapturePolicy, sdr_white_nits: f32) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
-        let capture = init_capture(&d3d_ctx, target)?;
+        let capture = init_capture(&d3d_ctx, target, policy)?;
+        let target_hdr = capture.is_hdr();
         capture.start()?;
         // Create reader after start() to let DWM start preparing first frame as early as possible
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-        // Pre-create Staging Texture to avoid ~11ms creation overhead on first read_frame
+        // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback.
+        // Hdr mode outputs R16G16B16A16_FLOAT (8 bpp); Auto/Sdr output BGRA8 (4 bpp).
         let (w, h) = capture.target_size();
-        reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let (staging_format, bpp) = if policy == CapturePolicy::Hdr {
+            (DXGI_FORMAT_R16G16B16A16_FLOAT, 8)
+        } else {
+            (DXGI_FORMAT_B8G8R8A8_UNORM, 4)
+        };
+        reader.ensure_staging_texture(w, h, staging_format)?;
+        let output_frame_bytes = w as usize * h as usize * bpp;
+        let output_pool = ElasticBufferPool::new(output_frame_bytes);
+
+        // Create tone-map pass only for Auto (may need HDR→SDR conversion)
+        let tone_map_pass = if policy == CapturePolicy::Auto {
+            Some(ToneMapPass::new(&d3d_ctx.device, &d3d_ctx.context)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
+            policy,
             capture,
             reader,
+            output_pool,
+            output_frame_bytes,
             first_call: true,
-            cached_timestamp: None,
+            cached_frame: None,
+            tone_map_pass,
+            sdr_white_nits,
+            target_hdr,
+            _not_send_sync: PhantomData,
         })
     }
 
@@ -153,53 +270,91 @@ impl CapturePipeline {
         })
     }
 
-    /// Extract texture from WGC frame and read back pixel data
-    fn read_frame(
+    /// Extract texture and metadata from WGC frame.
+    fn read_raw_frame(
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
-    ) -> Result<CapturedFrame> {
+    ) -> Result<RawFrame> {
         // Extract timestamp (SystemRelativeTime, 100ns precision, converted to seconds)
         let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
 
         let texture = WGCCapture::frame_to_texture(frame)?;
 
-        let (width, height) = unsafe {
+        let (width, height, format) = unsafe {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut desc);
-            (desc.Width, desc.Height)
+            (desc.Width, desc.Height, desc.Format)
         };
+        let color_format = Self::color_format(format)?;
 
-        let data = self.reader.read_texture(&texture)?;
-
-        // Cache timestamp for static-screen fallback.
-        // Pixel data and dimensions are already in TextureReader.
-        self.cached_timestamp = Some(timestamp);
-
-        Ok(CapturedFrame {
-            data,
+        Ok(RawFrame {
+            texture,
             width,
             height,
             timestamp,
+            format: color_format,
         })
     }
 
-    /// Build a CapturedFrame from the cached pixel data in TextureReader.
-    /// Only called on the fallback path (static screen, no new frames available).
-    fn build_cached_frame(&self) -> Result<CapturedFrame> {
-        let timestamp = self
-            .cached_timestamp
-            .expect("build_cached_frame called without cached data");
-        let (width, height) = self.reader.last_dimensions();
-        let data = self.reader.clone_buffer();
-        if data.is_empty() {
-            bail!("No cached frame data available");
-        }
-        Ok(CapturedFrame {
-            data,
+    /// Run color pipeline once and cache the final output for fallback.
+    fn process_and_cache(&mut self, raw: RawFrame) -> Result<CapturedFrame> {
+        let processed = color::process_frame(
+            ColorFrame {
+                texture: raw.texture,
+                width: raw.width,
+                height: raw.height,
+                timestamp: raw.timestamp,
+                format: raw.format,
+            },
+            self.policy,
+            self.tone_map_pass.as_mut(),
+            self.sdr_white_nits,
+        )?;
+
+        let ColorFrame {
+            texture,
             width,
             height,
             timestamp,
-        })
+            format,
+        } = processed;
+        let required_len = Self::frame_bytes(width, height, format);
+
+        // Rebuild output pool when processed frame size grows (e.g. format/resolution change).
+        // Existing published frames keep old pool alive via Arc and are recycled independently.
+        if required_len > self.output_frame_bytes {
+            self.output_frame_bytes = required_len;
+            self.output_pool = ElasticBufferPool::new(self.output_frame_bytes);
+        }
+
+        let mut pooled = self.output_pool.acquire();
+        let written = self
+            .reader
+            .read_texture_into(&texture, pooled.as_mut_slice())?;
+        let (mut dst_vec, group_idx, pool) = pooled.into_parts();
+        dst_vec.truncate(written);
+
+        let output = CapturedFrame {
+            data: Arc::new(SharedFrameData {
+                bytes: dst_vec,
+                pool,
+                group_idx,
+            }),
+            width,
+            height,
+            timestamp,
+            format,
+        };
+        self.cached_frame = Some(output.clone());
+        Ok(output)
+    }
+
+    /// Build a CapturedFrame from the cached processed output.
+    /// Only called on the fallback path (static screen, no new frames available).
+    fn build_cached_frame(&self) -> Result<CapturedFrame> {
+        self.cached_frame
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No cached frame data available"))
     }
 
     /// Screenshot mode: capture a fresh frame
@@ -214,7 +369,8 @@ impl CapturePipeline {
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-            return self.read_frame(&frame);
+            let raw = self.read_raw_frame(&frame)?;
+            return self.process_and_cache(raw);
         }
 
         // Drain pool, keep last frame as fallback
@@ -226,23 +382,26 @@ impl CapturePipeline {
         // Try to get a fresh frame with short timeout
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
             // New frame arrived — use it (discard fallback if any)
-            return self.read_frame(&fresh);
+            let raw = self.read_raw_frame(&fresh)?;
+            return self.process_and_cache(raw);
         }
 
         // Timeout — screen is likely static
         if let Some(fb) = fallback {
             // Use the last drained frame (most recent available)
-            return self.read_frame(&fb);
+            let raw = self.read_raw_frame(&fb)?;
+            return self.process_and_cache(raw);
         }
 
         // Pool was empty AND no new frame — use cached data
-        if self.cached_timestamp.is_some() {
+        if self.cached_frame.is_some() {
             return self.build_cached_frame();
         }
 
         // No cache either — true cold start edge case, full timeout
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-        self.read_frame(&frame)
+        let raw = self.read_raw_frame(&frame)?;
+        self.process_and_cache(raw)
     }
 
     /// Continuous capture mode: grab latest available frame
@@ -257,7 +416,8 @@ impl CapturePipeline {
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-            return self.read_frame(&frame);
+            let raw = self.read_raw_frame(&frame)?;
+            return self.process_and_cache(raw);
         }
 
         // Drain pool, keep last frame
@@ -268,46 +428,34 @@ impl CapturePipeline {
 
         // Got a buffered frame — use it
         if let Some(f) = latest {
-            return self.read_frame(&f);
+            let raw = self.read_raw_frame(&f)?;
+            return self.process_and_cache(raw);
         }
 
         // Pool empty — try short wait for new frame
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
-            return self.read_frame(&fresh);
+            let raw = self.read_raw_frame(&fresh)?;
+            return self.process_and_cache(raw);
         }
 
         // Timeout — screen is likely static, use cached data
-        if self.cached_timestamp.is_some() {
+        if self.cached_frame.is_some() {
             return self.build_cached_frame();
         }
 
         // No cache — full timeout (should not happen in normal usage)
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-        self.read_frame(&frame)
+        let raw = self.read_raw_frame(&frame)?;
+        self.process_and_cache(raw)
     }
-}
 
-/// One-liner screenshot: create pipeline → capture frame → return
-///
-/// Suitable for scenarios where only one screenshot is needed. Internally creates and destroys pipeline,
-/// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
-///
-/// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
-pub fn screenshot(monitor_index: usize) -> Result<CapturedFrame> {
-    let mut pipeline = CapturePipeline::monitor(monitor_index)?;
-    pipeline.capture()
-}
+    /// Whether the target monitor has HDR enabled.
+    pub fn is_hdr(&self) -> bool {
+        self.target_hdr
+    }
 
-/// One-liner window screenshot: create pipeline → capture frame → return
-///
-/// Captures the first matching top-level window of `process_name`.
-/// Use `window_index` to select the Nth matching window when multiple exist.
-///
-/// Suitable for scenarios where only one screenshot is needed. Internally creates and destroys pipeline,
-/// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
-///
-/// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
-pub fn screenshot_window(process_name: &str, window_index: Option<usize>) -> Result<CapturedFrame> {
-    let mut pipeline = CapturePipeline::window(process_name, window_index)?;
-    pipeline.capture()
+    /// Buffer pool statistics (for diagnostics / benchmarks).
+    pub fn pool_stats(&self) -> crate::memory::PoolStats {
+        self.output_pool.stats()
+    }
 }

@@ -4,7 +4,7 @@
 // If target window doesn't exist, test will gracefully skip.
 
 use hdrcapture::capture::find_window;
-use hdrcapture::pipeline::CapturePipeline;
+use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 
 // ---------------------------------------------------------------------------
 // Configuration: modify here to specify target window
@@ -30,7 +30,8 @@ fn test_capture_target_window() {
         return;
     }
 
-    let mut pipeline = CapturePipeline::window(TARGET_PROCESS, Some(TARGET_INDEX)).unwrap();
+    let mut pipeline =
+        CapturePipeline::window(TARGET_PROCESS, Some(TARGET_INDEX), CapturePolicy::Auto).unwrap();
     let frame = pipeline.capture().unwrap();
 
     assert!(frame.width > 0 && frame.height > 0);

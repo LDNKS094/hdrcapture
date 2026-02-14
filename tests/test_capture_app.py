@@ -1,12 +1,18 @@
 import hdrcapture as hc
+import time
 
 
 def main():
+    st = time.perf_counter()
     try:
-        with hc.Capture.window("Endfield.exe") as cap:
+        with hc.capture.window("Endfield.exe") as cap:
             cap.grab().save("test_endfield.png")
+            
     except RuntimeError as e:
         print(f"Skip Endfield window capture: {e}")
+
+    ed = time.perf_counter()
+    print(f"Using {(ed-st)*1000:.2f}ms")
 
     try:
         hc.screenshot(window="Client-Win64-Shipping.exe").save("test_wuwa_0.png")

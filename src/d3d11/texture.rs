@@ -71,6 +71,8 @@ impl TextureReader {
             MiscFlags: 0,
         };
 
+        // SAFETY: `desc` is fully initialized with valid fields and `self.device` is a live D3D11 device;
+        // CreateTexture2D writes to local `texture` only and returns a COM-owned object on success.
         unsafe {
             let mut texture = None;
             self.device
@@ -92,26 +94,63 @@ impl TextureReader {
         Ok(())
     }
 
-    /// Dimensions of the last read texture.
-    pub fn last_dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    /// Clone the internal pixel buffer.
+    /// Read data from GPU texture to CPU
     ///
-    /// The buffer contains data from the last successful `read_texture()` call,
-    /// with RowPitch padding already stripped. Returns an empty Vec if no frame
-    /// has been read yet.
-    ///
-    /// Only used on the fallback path (static screen), so the clone cost is acceptable.
-    pub fn clone_buffer(&self) -> Vec<u8> {
-        let bpp = bytes_per_pixel(self.format).unwrap_or(4);
-        let expected = self.width as usize * self.height as usize * bpp;
-        if expected > 0 && self.buffer.len() >= expected {
-            self.buffer[..expected].to_vec()
-        } else {
-            Vec::new()
+    /// Writes row-stripped bytes into caller-provided buffer and returns written byte count.
+    pub fn read_texture_into(
+        &mut self,
+        source_texture: &ID3D11Texture2D,
+        dst: &mut [u8],
+    ) -> Result<usize> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            source_texture.GetDesc(&mut desc);
         }
+
+        let bpp = bytes_per_pixel(desc.Format)?;
+
+        self.ensure_staging_texture(desc.Width, desc.Height, desc.Format)?;
+        let staging = self.staging_texture.as_ref().unwrap();
+
+        let row_bytes = desc.Width as usize * bpp;
+        let height = desc.Height as usize;
+        let required = row_bytes * height;
+        if dst.len() < required {
+            bail!(
+                "Destination buffer too small: required={}, got={}",
+                required,
+                dst.len()
+            );
+        }
+
+        unsafe {
+            // GPU -> Staging copy
+            self.context.CopyResource(staging, source_texture);
+
+            // Map memory for CPU read access
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("Failed to map staging texture")?;
+
+            let row_pitch = mapped.RowPitch as usize;
+
+            // Copy row by row to destination buffer, stripping RowPitch trailing padding
+            let src = mapped.pData as *const u8;
+            for y in 0..height {
+                // SAFETY: src points to mapped GPU memory, row_pitch * y + row_bytes is within mapped range;
+                //         dst has been validated to hold at least `required` bytes above.
+                std::ptr::copy_nonoverlapping(
+                    src.add(y * row_pitch),
+                    dst.as_mut_ptr().add(y * row_bytes),
+                    row_bytes,
+                );
+            }
+
+            self.context.Unmap(staging, 0);
+        }
+
+        Ok(required)
     }
 
     /// Read data from GPU texture to CPU
@@ -130,7 +169,7 @@ impl TextureReader {
         let staging = self.staging_texture.as_ref().unwrap();
 
         unsafe {
-            // GPU → Staging copy
+            // GPU -> Staging copy
             self.context.CopyResource(staging, source_texture);
 
             // Map memory for CPU read access

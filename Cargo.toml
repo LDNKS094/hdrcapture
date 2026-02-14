@@ -1,6 +1,6 @@
 [package]
 name = "hdrcapture"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["LDNKS094"]
 description = "Windows screen capture that works correctly under HDR"
@@ -25,6 +25,15 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # D3DCompile (shader compilation)
+    "Win32_Graphics_Direct3D_Fxc",
+    # WIC (JPEG XR encoding)
+    "Win32_Graphics_Imaging",
+    # COM runtime
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    # DisplayConfig (SDR white level query)
+    "Win32_Devices_Display",
     # WinRT interop
     "Win32_System_WinRT",
     "Win32_System_WinRT_Graphics_Capture",
@@ -41,8 +50,10 @@ windows = { version = "0.62", features = [
 ] }
 anyhow = "1.0"
 image = "0.25"
-pyo3 = "0.28.0"
-numpy = "0.28.0"
+pyo3 = "0.28.1"
+numpy = { version = "0.28.0", features = ["half"] }
+half = "2"
+exr = "1.74.0"
 
 [profile.release]
 opt-level = 3
