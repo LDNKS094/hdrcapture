@@ -28,7 +28,12 @@ class CapturedFrame:
         ...
 
     def save(self, path: str) -> None:
-        """Save as PNG file."""
+        """Save frame to file (format determined by extension).
+
+        Supported formats:
+          - .png — PNG (bgra8 / SDR frames only)
+          - .jxr — JPEG XR (both bgra8 and rgba16f / HDR)
+        """
         ...
 
     def ndarray(self) -> NDArray[np.uint8]:

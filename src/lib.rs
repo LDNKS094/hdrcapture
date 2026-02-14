@@ -27,6 +27,7 @@
 pub mod capture;
 pub mod color;
 pub mod d3d11;
+pub mod image;
 pub mod memory;
 pub mod pipeline;
 mod python;

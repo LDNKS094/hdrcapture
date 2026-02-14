@@ -57,16 +57,45 @@ impl CapturedFrame {
         }
     }
 
-    /// Save as PNG file (fast compression)
+    /// Save frame to file.
+    ///
+    /// Format is determined by file extension:
+    /// - `.png` — PNG (BGRA8 frames only)
+    /// - `.jxr` — JPEG XR (both BGRA8 and RGBA16F)
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        match ext.as_str() {
+            "png" => self.save_png(path),
+            "jxr" => crate::image::jxr::save_jxr(
+                path,
+                self.data.as_slice(),
+                self.width,
+                self.height,
+                self.format,
+            ),
+            _ => bail!(
+                "Unsupported file extension '.{}'; supported: .png (SDR), .jxr (HDR/SDR)",
+                ext
+            ),
+        }
+    }
+
+    /// PNG encoding (BGRA8 only, fast compression).
+    fn save_png(&self, path: &Path) -> Result<()> {
         if self.format != ColorPixelFormat::Bgra8 {
             bail!(
-                "Saving {:?} frame is not supported yet; tone-map/export path is pending",
+                "PNG only supports BGRA8 frames; this frame is {:?}. Use .jxr for HDR data.",
                 self.format
             );
         }
 
-        let file = std::fs::File::create(path.as_ref())?;
+        let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
         let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
 

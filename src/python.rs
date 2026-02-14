@@ -122,9 +122,12 @@ impl CapturedFrame {
         }
     }
 
-    /// Save as image file (format determined by extension, e.g., .png, .bmp, .jpg)
+    /// Save frame to file (format determined by extension).
     ///
-    /// Rust side directly performs BGRA→RGBA conversion and writes to disk, bypassing Python memory.
+    /// Supported formats:
+    ///   - .png — PNG (BGRA8 / SDR frames only)
+    ///   - .jxr — JPEG XR (both BGRA8 and RGBA16F / HDR)
+    ///
     /// Releases GIL during encoding, doesn't block other Python threads.
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = &self.inner;
