@@ -6,6 +6,8 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
 use crate::capture::CapturePolicy;
 
+pub use tone_map::ToneMapPass;
+
 /// Pixel format used by color pipeline input/output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorPixelFormat {
@@ -24,7 +26,12 @@ pub struct ColorFrame {
 
 /// Unified color-processing entry.
 ///
-/// Current implementation is a no-op pass-through.
-pub fn process_frame(frame: ColorFrame, policy: CapturePolicy) -> Result<ColorFrame> {
-    tone_map::process(frame, policy)
+/// Runs GPU tone-map for Auto+Rgba16f, passes through everything else.
+pub fn process_frame(
+    frame: ColorFrame,
+    policy: CapturePolicy,
+    tone_map_pass: Option<&mut ToneMapPass>,
+    sdr_white_nits: f32,
+) -> Result<ColorFrame> {
+    tone_map::process(frame, policy, tone_map_pass, sdr_white_nits)
 }

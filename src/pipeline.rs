@@ -21,7 +21,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use crate::capture::wgc::{CaptureTarget, WGCCapture};
 pub use crate::capture::CapturePolicy;
 use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_capture};
-use crate::color::{self, ColorFrame, ColorPixelFormat};
+use crate::color::white_level;
+use crate::color::{self, ColorFrame, ColorPixelFormat, ToneMapPass};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
 use crate::memory::{ElasticBufferPool, PoolStats};
@@ -147,6 +148,10 @@ pub struct CapturePipeline {
     first_call: bool,
     /// Last successful processed frame, for static-screen fallback.
     cached_frame: Option<CapturedFrame>,
+    /// GPU tone-map pass (Some when Auto policy may produce Rgba16f).
+    tone_map_pass: Option<ToneMapPass>,
+    /// SDR white level in nits, queried at pipeline creation.
+    sdr_white_nits: f32,
 }
 
 struct RawFrame {
@@ -180,7 +185,8 @@ impl CapturePipeline {
     pub fn monitor(index: usize, policy: CapturePolicy) -> Result<Self> {
         enable_dpi_awareness();
         let hmonitor = find_monitor(index)?;
-        Self::new(CaptureTarget::Monitor(hmonitor), policy)
+        let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
+        Self::new(CaptureTarget::Monitor(hmonitor), policy, sdr_white_nits)
     }
 
     /// Create window capture pipeline by process name
@@ -189,21 +195,36 @@ impl CapturePipeline {
     pub fn window(process_name: &str, index: Option<usize>, policy: CapturePolicy) -> Result<Self> {
         enable_dpi_awareness();
         let hwnd = find_window(process_name, index)?;
-        Self::new(CaptureTarget::Window(hwnd), policy)
+        let hmonitor = unsafe {
+            windows::Win32::Graphics::Gdi::MonitorFromWindow(
+                hwnd,
+                windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
+            )
+        };
+        let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
+        Self::new(CaptureTarget::Window(hwnd), policy, sdr_white_nits)
     }
 
-    fn new(target: CaptureTarget, policy: CapturePolicy) -> Result<Self> {
+    fn new(target: CaptureTarget, policy: CapturePolicy, sdr_white_nits: f32) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
         let capture = init_capture(&d3d_ctx, target, policy)?;
         capture.start()?;
         // Create reader after start() to let DWM start preparing first frame as early as possible
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
-        // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback
+        // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback.
+        // After tone-map, output is always BGRA8 regardless of capture format.
         let (w, h) = capture.target_size();
         reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
         let output_frame_bytes = w as usize * h as usize * 4;
         let output_pool = ElasticBufferPool::new(output_frame_bytes);
+
+        // Create tone-map pass when Auto policy might produce Rgba16f
+        let tone_map_pass = if policy == CapturePolicy::Auto {
+            Some(ToneMapPass::new(&d3d_ctx.device, &d3d_ctx.context)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
@@ -214,6 +235,8 @@ impl CapturePipeline {
             output_frame_bytes,
             first_call: true,
             cached_frame: None,
+            tone_map_pass,
+            sdr_white_nits,
         })
     }
 
@@ -289,6 +312,8 @@ impl CapturePipeline {
                 format: raw.format,
             },
             self._policy,
+            self.tone_map_pass.as_mut(),
+            self.sdr_white_nits,
         )?;
 
         let ColorFrame {

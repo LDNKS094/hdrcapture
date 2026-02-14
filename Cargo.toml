@@ -27,6 +27,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     # D3DCompile (shader compilation)
     "Win32_Graphics_Direct3D_Fxc",
+    # DisplayConfig (SDR white level query)
+    "Win32_Devices_Display",
     # WinRT interop
     "Win32_System_WinRT",
     "Win32_System_WinRT_Graphics_Capture",
