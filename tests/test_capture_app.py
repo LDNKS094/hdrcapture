@@ -3,7 +3,7 @@ import hdrcapture as hc
 
 def main():
     try:
-        with hc.Capture.window("Endfield.exe") as cap:
+        with hc.capture.window("Endfield.exe") as cap:
             cap.grab().save("test_endfield.png")
     except RuntimeError as e:
         print(f"Skip Endfield window capture: {e}")

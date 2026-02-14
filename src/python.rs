@@ -257,6 +257,14 @@ impl Capture {
         })
     }
 
+    /// Whether the target monitor has HDR enabled.
+    #[getter]
+    fn is_hdr(&self) -> PyResult<bool> {
+        let p = self.pipeline.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))?;
+        Ok(p.is_hdr())
+    }
+
     /// Screenshot mode: capture a fresh frame
     ///
     /// Drain backlog and wait for DWM to push new frame, guarantees returned frame is generated after the call.
