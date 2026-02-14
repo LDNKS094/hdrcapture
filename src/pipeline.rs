@@ -25,16 +25,7 @@ use crate::color::white_level;
 use crate::color::{self, ColorFrame, ColorPixelFormat, ToneMapPass};
 use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
-use crate::memory::{ElasticBufferPool, PoolStats};
-
-/// One-shot capture source (high-level input before OS handle resolution).
-pub enum CaptureSource<'a> {
-    Monitor(usize),
-    Window {
-        process_name: &'a str,
-        window_index: Option<usize>,
-    },
-}
+use crate::memory::ElasticBufferPool;
 
 /// First frame wait timeout
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
@@ -138,7 +129,7 @@ impl Drop for SharedFrameData {
 /// ```
 pub struct CapturePipeline {
     _d3d_ctx: D3D11Context,
-    _policy: CapturePolicy,
+    policy: CapturePolicy,
     capture: WGCCapture,
     reader: TextureReader,
     output_pool: Arc<ElasticBufferPool>,
@@ -152,6 +143,8 @@ pub struct CapturePipeline {
     tone_map_pass: Option<ToneMapPass>,
     /// SDR white level in nits, queried at pipeline creation.
     sdr_white_nits: f32,
+    /// Whether the target monitor has HDR enabled (detected once at init).
+    target_hdr: bool,
 }
 
 struct RawFrame {
@@ -208,18 +201,24 @@ impl CapturePipeline {
     fn new(target: CaptureTarget, policy: CapturePolicy, sdr_white_nits: f32) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
         let capture = init_capture(&d3d_ctx, target, policy)?;
+        let target_hdr = capture.is_hdr();
         capture.start()?;
         // Create reader after start() to let DWM start preparing first frame as early as possible
         let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
 
         // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback.
-        // After tone-map, output is always BGRA8 regardless of capture format.
+        // Hdr mode outputs R16G16B16A16_FLOAT (8 bpp); Auto/Sdr output BGRA8 (4 bpp).
         let (w, h) = capture.target_size();
-        reader.ensure_staging_texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
-        let output_frame_bytes = w as usize * h as usize * 4;
+        let (staging_format, bpp) = if policy == CapturePolicy::Hdr {
+            (DXGI_FORMAT_R16G16B16A16_FLOAT, 8)
+        } else {
+            (DXGI_FORMAT_B8G8R8A8_UNORM, 4)
+        };
+        reader.ensure_staging_texture(w, h, staging_format)?;
+        let output_frame_bytes = w as usize * h as usize * bpp;
         let output_pool = ElasticBufferPool::new(output_frame_bytes);
 
-        // Create tone-map pass when Auto policy might produce Rgba16f
+        // Create tone-map pass only for Auto (may need HDR→SDR conversion)
         let tone_map_pass = if policy == CapturePolicy::Auto {
             Some(ToneMapPass::new(&d3d_ctx.device, &d3d_ctx.context)?)
         } else {
@@ -228,7 +227,7 @@ impl CapturePipeline {
 
         Ok(Self {
             _d3d_ctx: d3d_ctx,
-            _policy: policy,
+            policy,
             capture,
             reader,
             output_pool,
@@ -237,6 +236,7 @@ impl CapturePipeline {
             cached_frame: None,
             tone_map_pass,
             sdr_white_nits,
+            target_hdr,
         })
     }
 
@@ -311,7 +311,7 @@ impl CapturePipeline {
                 timestamp: raw.timestamp,
                 format: raw.format,
             },
-            self._policy,
+            self.policy,
             self.tone_map_pass.as_mut(),
             self.sdr_white_nits,
         )?;
@@ -454,25 +454,8 @@ impl CapturePipeline {
         self.process_and_cache(raw)
     }
 
-    /// Output memory pool stats for diagnostics.
-    pub fn pool_stats(&self) -> PoolStats {
-        self.output_pool.stats()
+    /// Whether the target monitor has HDR enabled.
+    pub fn is_hdr(&self) -> bool {
+        self.target_hdr
     }
-}
-
-/// One-liner screenshot: create pipeline → capture frame → return
-///
-/// Suitable for scenarios where only one screenshot is needed. Internally creates and destroys pipeline,
-/// cold start ~79ms (includes D3D11 device creation + WGC session creation + first frame wait).
-///
-/// For multiple screenshots, use `CapturePipeline` to reuse the pipeline.
-pub fn screenshot(source: CaptureSource<'_>, policy: CapturePolicy) -> Result<CapturedFrame> {
-    let mut pipeline = match source {
-        CaptureSource::Monitor(index) => CapturePipeline::monitor(index, policy)?,
-        CaptureSource::Window {
-            process_name,
-            window_index,
-        } => CapturePipeline::window(process_name, window_index, policy)?,
-    };
-    pipeline.capture()
 }

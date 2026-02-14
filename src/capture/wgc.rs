@@ -57,6 +57,8 @@ pub struct WGCCapture {
     /// Initial size of capture target (for pre-creating Staging Texture)
     target_width: u32,
     target_height: u32,
+    /// Whether the target monitor has HDR enabled (detected once at init)
+    target_hdr: bool,
 }
 
 impl WGCCapture {
@@ -69,6 +71,11 @@ impl WGCCapture {
     /// Initial size of capture target
     pub fn target_size(&self) -> (u32, u32) {
         (self.target_width, self.target_height)
+    }
+
+    /// Whether the target monitor has HDR enabled.
+    pub fn is_hdr(&self) -> bool {
+        self.target_hdr
     }
 
     /// Try to get a frame from FramePool (non-blocking)
@@ -188,10 +195,12 @@ pub fn init_capture(
     let size = item.Size()?;
 
     // 2. Create FramePool format.
-    // OBS rule: force_sdr wins; otherwise follow target monitor HDR state.
+    // Sdr: always BGRA8. Hdr: always R16G16B16A16_FLOAT.
+    // Auto: follow target monitor HDR state.
     let is_hdr = target_is_hdr(d3d_ctx, target).unwrap_or(false);
     let pixel_format = match (policy, is_hdr) {
-        (CapturePolicy::ForceSdr, _) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        (CapturePolicy::Sdr, _) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        (CapturePolicy::Hdr, _) => DirectXPixelFormat::R16G16B16A16Float,
         (CapturePolicy::Auto, true) => DirectXPixelFormat::R16G16B16A16Float,
         (CapturePolicy::Auto, false) => DirectXPixelFormat::B8G8R8A8UIntNormalized,
     };
@@ -239,6 +248,7 @@ pub fn init_capture(
         shutting_down,
         target_width: size.Width as u32,
         target_height: size.Height as u32,
+        target_hdr: is_hdr,
     })
 }
 

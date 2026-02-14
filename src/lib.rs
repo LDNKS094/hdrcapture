@@ -9,15 +9,15 @@
 //! ## Rust usage
 //!
 //! ```no_run
-//! use hdrcapture::pipeline;
-//! use hdrcapture::pipeline::{CapturePolicy, CaptureSource};
+//! use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 //!
 //! // One-shot screenshot
-//! let frame = pipeline::screenshot(CaptureSource::Monitor(0), CapturePolicy::Auto).unwrap();
+//! let mut cap = CapturePipeline::monitor(0, CapturePolicy::Auto).unwrap();
+//! let frame = cap.capture().unwrap();
 //! frame.save("screenshot.png").unwrap();
 //!
 //! // Reusable pipeline
-//! let mut cap = pipeline::CapturePipeline::monitor(0, CapturePolicy::Auto).unwrap();
+//! let mut cap = CapturePipeline::monitor(0, CapturePolicy::Auto).unwrap();
 //! let frame = cap.capture().unwrap();
 //! println!("{}x{}", frame.width, frame.height);
 //! ```

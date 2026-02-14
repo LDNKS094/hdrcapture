@@ -44,6 +44,42 @@ fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
     })
 }
 
+/// Parse a Python mode string into CapturePolicy.
+fn parse_mode(mode: &str) -> PyResult<pipeline::CapturePolicy> {
+    pipeline::CapturePolicy::from_mode(mode).ok_or_else(|| {
+        PyRuntimeError::new_err(format!(
+            "invalid mode '{}': expected 'auto', 'hdr', or 'sdr'",
+            mode
+        ))
+    })
+}
+
+/// Emit a Python `UserWarning` when the requested mode doesn't match the monitor's HDR state.
+/// Does nothing for `auto` mode (it adapts automatically).
+fn warn_mode_mismatch(
+    py: Python<'_>,
+    policy: pipeline::CapturePolicy,
+    is_hdr: bool,
+) -> PyResult<()> {
+    let msg = match (policy, is_hdr) {
+        (pipeline::CapturePolicy::Hdr, false) => Some(
+            "mode='hdr' requested but the target monitor is SDR; \
+             capture will proceed but output will not contain real HDR data",
+        ),
+        (pipeline::CapturePolicy::Sdr, true) => Some(
+            "mode='sdr' requested but the target monitor is HDR; \
+             HDR content will be clipped to SDR range without tone-mapping",
+        ),
+        _ => None,
+    };
+
+    if let Some(msg) = msg {
+        let warnings = py.import("warnings")?;
+        warnings.call_method1("warn", (msg,))?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CapturedFrame — frame container
 // ---------------------------------------------------------------------------
@@ -181,13 +217,14 @@ impl Capture {
     ///
     /// Args:
     ///     index: Monitor index, defaults to 0
-    ///     force_sdr: Force SDR-compatible capture path
+    ///     mode: Capture mode — "auto", "hdr", or "sdr"
     #[staticmethod]
-    #[pyo3(signature = (index=0, force_sdr=false))]
-    fn monitor(index: usize, force_sdr: bool) -> PyResult<Self> {
-        let policy = pipeline::CapturePolicy::from(force_sdr);
+    #[pyo3(signature = (index=0, mode="auto"))]
+    fn monitor(py: Python<'_>, index: usize, mode: &str) -> PyResult<Self> {
+        let policy = parse_mode(mode)?;
         let pipeline = pipeline::CapturePipeline::monitor(index, policy)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
         Ok(Self {
             pipeline: Some(pipeline),
         })
@@ -198,13 +235,19 @@ impl Capture {
     /// Args:
     ///     process_name: Process name (e.g., "notepad.exe")
     ///     index: Window index for processes with the same name, defaults to 0
-    ///     force_sdr: Force SDR-compatible capture path
+    ///     mode: Capture mode — "auto", "hdr", or "sdr"
     #[staticmethod]
-    #[pyo3(signature = (process_name, index=None, force_sdr=false))]
-    fn window(process_name: &str, index: Option<usize>, force_sdr: bool) -> PyResult<Self> {
-        let policy = pipeline::CapturePolicy::from(force_sdr);
+    #[pyo3(signature = (process_name, index=None, mode="auto"))]
+    fn window(
+        py: Python<'_>,
+        process_name: &str,
+        index: Option<usize>,
+        mode: &str,
+    ) -> PyResult<Self> {
+        let policy = parse_mode(mode)?;
         let pipeline = pipeline::CapturePipeline::window(process_name, index, policy)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
         Ok(Self {
             pipeline: Some(pipeline),
         })
@@ -273,31 +316,34 @@ impl Capture {
 ///     monitor: Monitor index, defaults to 0
 ///     window: Process name for window capture (e.g., "notepad.exe")
 ///     window_index: Window index for processes with the same name, defaults to 0
-///     force_sdr: Force SDR-compatible capture path
+///     mode: Capture mode — "auto", "hdr", or "sdr"
 ///
 /// Returns:
 ///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
-#[pyo3(signature = (monitor=0, window=None, window_index=None, force_sdr=false))]
+#[pyo3(signature = (monitor=0, window=None, window_index=None, mode="auto"))]
 fn screenshot(
     py: Python<'_>,
     monitor: usize,
     window: Option<&str>,
     window_index: Option<usize>,
-    force_sdr: bool,
+    mode: &str,
 ) -> PyResult<CapturedFrame> {
-    let policy = pipeline::CapturePolicy::from(force_sdr);
-    let frame = detach_gil(py, || match window {
-        Some(process_name) => pipeline::screenshot(
-            pipeline::CaptureSource::Window {
-                process_name,
-                window_index,
-            },
-            policy,
-        ),
-        None => pipeline::screenshot(pipeline::CaptureSource::Monitor(monitor), policy),
+    let policy = parse_mode(mode)?;
+
+    // Create pipeline (releases GIL during D3D11/WGC init)
+    let mut pipe = detach_gil(py, || match window {
+        Some(process_name) => pipeline::CapturePipeline::window(process_name, window_index, policy),
+        None => pipeline::CapturePipeline::monitor(monitor, policy),
     })?
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    // Warn on mode/HDR mismatch (needs GIL for Python warnings)
+    warn_mode_mismatch(py, policy, pipe.is_hdr())?;
+
+    // Capture frame (releases GIL during wait + readback)
+    let frame =
+        detach_gil(py, || pipe.capture())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(CapturedFrame { inner: frame })
 }
 
