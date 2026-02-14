@@ -41,9 +41,13 @@ struct OutputCache {
 }
 
 impl ToneMapPass {
-    /// Create a new tone-map pass, compiling the shader.
+    /// Create a new tone-map pass with the default (BT.2390 EETF) shader.
     pub fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self> {
-        let hlsl = crate::shader::HDR_TONEMAP_HLSL;
+        Self::with_shader(device, context, crate::shader::HDR_TONEMAP_EETF_HLSL)
+    }
+
+    /// Create a tone-map pass with a custom HLSL shader source.
+    pub fn with_shader(device: &ID3D11Device, context: &ID3D11DeviceContext, hlsl: &str) -> Result<Self> {
         let shader = ComputeShader::compile(device, hlsl, "main")?;
 
         // Create constant buffer (16 bytes, one float + padding)
