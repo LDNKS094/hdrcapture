@@ -10,8 +10,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ExtendedColorType, ImageEncoder};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC;
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -60,53 +58,16 @@ impl CapturedFrame {
     /// Save frame to file.
     ///
     /// Format is determined by file extension:
-    /// - `.png` — PNG (BGRA8 frames only)
+    /// - `.png` `.bmp` `.jpg` `.tiff` — standard formats (BGRA8 only)
     /// - `.jxr` — JPEG XR (both BGRA8 and RGBA16F)
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        match ext.as_str() {
-            "png" => self.save_png(path),
-            "jxr" => crate::image::jxr::save_jxr(
-                path,
-                self.data.as_slice(),
-                self.width,
-                self.height,
-                self.format,
-            ),
-            _ => bail!(
-                "Unsupported file extension '.{}'; supported: .png (SDR), .jxr (HDR/SDR)",
-                ext
-            ),
-        }
-    }
-
-    /// PNG encoding (BGRA8 only, fast compression).
-    fn save_png(&self, path: &Path) -> Result<()> {
-        if self.format != ColorPixelFormat::Bgra8 {
-            bail!(
-                "PNG only supports BGRA8 frames; this frame is {:?}. Use .jxr for HDR data.",
-                self.format
-            );
-        }
-
-        let file = std::fs::File::create(path)?;
-        let writer = std::io::BufWriter::new(file);
-        let encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
-
-        // BGRA → RGBA
-        let mut rgba = self.data.as_slice().to_vec();
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-
-        encoder.write_image(&rgba, self.width, self.height, ExtendedColorType::Rgba8)?;
-        Ok(())
+        crate::image::save(
+            path.as_ref(),
+            self.data.as_slice(),
+            self.width,
+            self.height,
+            self.format,
+        )
     }
 }
 

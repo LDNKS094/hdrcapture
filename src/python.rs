@@ -125,7 +125,7 @@ impl CapturedFrame {
     /// Save frame to file (format determined by extension).
     ///
     /// Supported formats:
-    ///   - .png — PNG (BGRA8 / SDR frames only)
+    ///   - .png .bmp .jpg .tiff — standard formats (BGRA8 / SDR only)
     ///   - .jxr — JPEG XR (both BGRA8 and RGBA16F / HDR)
     ///
     /// Releases GIL during encoding, doesn't block other Python threads.
