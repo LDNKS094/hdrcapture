@@ -51,20 +51,17 @@ class CapturedFrame:
         """
         ...
 
-    def ndarray(self) -> NDArray[np.uint8]:
-        """Convert to numpy array.
+    def ndarray(self) -> NDArray[np.uint8] | NDArray[np.float16]:
+        """Convert to numpy array, shape ``(H, W, 4)``.
 
-        Returns:
-            Array of shape ``(H, W, 4)``, dtype ``uint8``, BGRA channel order.
-
-        Raises:
-            RuntimeError: If frame format is ``rgba16f`` (not yet supported).
+        - ``bgra8``: dtype ``uint8``, BGRA channel order
+        - ``rgba16f``: dtype ``float16``, RGBA channel order
         """
         ...
 
     def __array__(
         self, dtype: object = None, copy: object = None
-    ) -> NDArray[np.uint8]:
+    ) -> NDArray[np.uint8] | NDArray[np.float16]:
         """NumPy ``__array__`` protocol — enables ``np.array(frame)``."""
         ...
 

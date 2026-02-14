@@ -9,8 +9,9 @@
 
 use std::panic::AssertUnwindSafe;
 
+use half::f16;
 use numpy::ndarray::Array3;
-use numpy::{IntoPyArray, PyArray3, PyArrayMethods};
+use numpy::{IntoPyArray, PyArrayMethods};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -143,11 +144,13 @@ impl CapturedFrame {
         detach_gil(py, || inner.save(&path))?.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Convert to ndarray
+    /// Convert to numpy array.
     ///
     /// Returns:
-    ///     numpy.ndarray: shape (H, W, 4), dtype uint8, BGRA channel order
-    fn ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
+    ///     numpy.ndarray: shape (H, W, 4).
+    ///       - bgra8: dtype uint8, BGRA channel order
+    ///       - rgba16f: dtype float16, RGBA channel order
+    fn ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.to_ndarray(py)
     }
 
@@ -158,7 +161,7 @@ impl CapturedFrame {
         py: Python<'py>,
         dtype: Option<Bound<'py, PyAny>>,
         copy: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let _ = (dtype, copy);
         self.to_ndarray(py)
     }
@@ -175,23 +178,42 @@ impl CapturedFrame {
 }
 
 impl CapturedFrame {
-    /// Internal shared numpy conversion logic
-    fn to_ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<u8>>> {
-        if self.inner.format != ColorPixelFormat::Bgra8 {
-            return Err(PyRuntimeError::new_err(
-                "ndarray() only supports bgra8 frames right now; rgba16f conversion path is pending",
-            ));
-        }
+    /// Internal shared numpy conversion logic.
+    ///
+    /// - bgra8 → (H, W, 4) uint8
+    /// - rgba16f → (H, W, 4) float16
+    fn to_ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let h = self.inner.height as usize;
         let w = self.inner.width as usize;
-        let array = Array3::from_shape_vec((h, w, 4), self.inner.data.as_slice().to_vec())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let pyarray = array.into_pyarray(py);
-        pyarray
-            .try_readwrite()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .make_nonwriteable();
-        Ok(pyarray)
+        let data = self.inner.data.as_slice();
+
+        match self.inner.format {
+            ColorPixelFormat::Bgra8 => {
+                let array = Array3::from_shape_vec((h, w, 4), data.to_vec())
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let pyarray = array.into_pyarray(py);
+                pyarray
+                    .try_readwrite()
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .make_nonwriteable();
+                Ok(pyarray.into_any())
+            }
+            ColorPixelFormat::Rgba16f => {
+                // SAFETY: f16 is #[repr(transparent)] over u16 (2 bytes).
+                // data length is guaranteed to be h * w * 8 by the capture pipeline.
+                let f16_slice: &[f16] = unsafe {
+                    std::slice::from_raw_parts(data.as_ptr() as *const f16, data.len() / 2)
+                };
+                let array = Array3::from_shape_vec((h, w, 4), f16_slice.to_vec())
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let pyarray = array.into_pyarray(py);
+                pyarray
+                    .try_readwrite()
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .make_nonwriteable();
+                Ok(pyarray.into_any())
+            }
+        }
     }
 }
 

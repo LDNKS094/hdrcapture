@@ -50,8 +50,9 @@ windows = { version = "0.62", features = [
 ] }
 anyhow = "1.0"
 image = "0.25"
-pyo3 = "0.28.0"
-numpy = "0.28.0"
+pyo3 = "0.28.1"
+numpy = { version = "0.28.0", features = ["half"] }
+half = "2"
 exr = "1.74.0"
 
 [profile.release]

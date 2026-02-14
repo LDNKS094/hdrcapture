@@ -2,7 +2,7 @@
 
 Windows screen capture with correct HDR handling.
 
-Existing Python screenshot libraries produce washed-out images when Windows HDR is enabled. `hdrcapture` solves this with Windows Graphics Capture (WGC) and a GPU-accelerated BT.2390 tone-mapping pipeline, delivering accurate colors in both SDR and HDR workflows.
+Existing Python screenshot libraries produce washed-out images when Windows HDR is enabled. `hdrcapture` solves this with Windows Graphics Capture (WGC) and a GPU-accelerated tone-mapping pipeline, delivering accurate colors in both SDR and HDR workflows.
 
 ## Features
 
@@ -11,7 +11,6 @@ Existing Python screenshot libraries produce washed-out images when Windows HDR 
 - Monitor and window capture
 - Single-shot and streaming modes
 - NumPy array output
-- GIL released during capture
 
 ## Requirements
 
@@ -86,11 +85,11 @@ with hdrcapture.capture.window("notepad.exe") as cap:
 
 The `mode` parameter controls how HDR content is handled:
 
-| Mode | Pixel Format | Behavior |
-|------|-------------|----------|
-| `"auto"` (default) | bgra8 | HDR monitor → GPU tone-map to SDR; SDR monitor → direct capture |
-| `"hdr"` | rgba16f | Raw 16-bit float scRGB output, no tone mapping |
-| `"sdr"` | bgra8 | Force 8-bit capture, DWM hard-clips HDR content |
+| Mode                 | Pixel Format | Behavior                                                          |
+| -------------------- | ------------ | ----------------------------------------------------------------- |
+| `"auto"` (default) | bgra8        | HDR monitor → GPU tone-map to SDR; SDR monitor → direct capture |
+| `"hdr"`            | rgba16f      | Raw 16-bit float scRGB output, no tone mapping                    |
+| `"sdr"`            | bgra8        | Force 8-bit capture, DWM hard-clips HDR content                   |
 
 ```python
 # Auto mode (recommended) — handles HDR transparently
@@ -107,14 +106,14 @@ frame = hdrcapture.screenshot(mode="sdr")
 
 ## Save Formats
 
-| Extension | HDR Support | Notes |
-|-----------|------------|-------|
-| `.png` | SDR only | Fast, lossless |
-| `.bmp` | SDR only | Uncompressed |
-| `.jpg` / `.jpeg` | SDR only | Lossy |
-| `.tiff` / `.tif` | SDR only | Lossless |
-| `.jxr` | SDR + HDR | Windows native, viewable in Photos app |
-| `.exr` | SDR + HDR | Industry standard for HDR/VFX |
+| Extension            | HDR Support | Notes                                  |
+| -------------------- | ----------- | -------------------------------------- |
+| `.png`             | SDR only    | Fast, lossless                         |
+| `.bmp`             | SDR only    | Uncompressed                           |
+| `.jpg` / `.jpeg` | SDR only    | Lossy                                  |
+| `.tiff` / `.tif` | SDR only    | Lossless                               |
+| `.jxr`             | SDR + HDR   | Windows native, viewable in Photos app |
+| `.exr`             | SDR + HDR   | Industry standard for HDR/VFX          |
 
 ## API Reference
 
@@ -124,14 +123,14 @@ One-shot capture. Creates and destroys a pipeline internally (~70ms cold start).
 
 ### `CapturedFrame`
 
-| Property / Method | Description |
-|---|---|
-| `width` | Frame width in pixels |
-| `height` | Frame height in pixels |
-| `timestamp` | Capture timestamp in seconds (relative to system boot) |
-| `format` | Pixel format: `"bgra8"` or `"rgba16f"` |
-| `save(path)` | Save to file (format by extension) |
-| `ndarray()` | NumPy array `(H, W, 4)`, dtype `uint8`, BGRA (bgra8 only) |
+| Property / Method | Description                                                   |
+| ----------------- | ------------------------------------------------------------- |
+| `width`         | Frame width in pixels                                         |
+| `height`        | Frame height in pixels                                        |
+| `timestamp`     | Capture timestamp in seconds (relative to system boot)        |
+| `format`        | Pixel format:`"bgra8"` or `"rgba16f"`                     |
+| `save(path)`    | Save to file (format by extension)                            |
+| `ndarray()`     | NumPy array `(H, W, 4)`, dtype `uint8`, BGRA (bgra8 only) |
 
 Supports `np.array(frame)` via the `__array__` protocol.
 
@@ -141,14 +140,14 @@ Reusable capture pipeline. Not thread-safe — use from the creating thread only
 
 If the display environment changes (HDR toggled, monitor plugged/unplugged), discard the instance and create a new one.
 
-| Method | Description |
-|---|---|
-| `capture.monitor(index=0, mode="auto")` | Create pipeline for a monitor |
-| `capture.window(process_name, index=None, mode="auto")` | Create pipeline for a window |
-| `.is_hdr` | Whether the target monitor has HDR enabled |
-| `.capture()` | Screenshot mode — waits for a fresh frame (~1 VSync) |
-| `.grab()` | Streaming mode — returns the latest available frame |
-| `.close()` | Release capture resources |
+| Method                                                    | Description                                           |
+| --------------------------------------------------------- | ----------------------------------------------------- |
+| `capture.monitor(index=0, mode="auto")`                 | Create pipeline for a monitor                         |
+| `capture.window(process_name, index=None, mode="auto")` | Create pipeline for a window                          |
+| `.is_hdr`                                               | Whether the target monitor has HDR enabled            |
+| `.capture()`                                            | Screenshot mode — waits for a fresh frame (~1 VSync) |
+| `.grab()`                                               | Streaming mode — returns the latest available frame  |
+| `.close()`                                              | Release capture resources                             |
 
 Supports context manager (`with` statement).
 
@@ -156,11 +155,11 @@ Supports context manager (`with` statement).
 
 Measured on 5120×1440 (ultrawide):
 
-| Metric | Value |
-|---|---|
-| Single-shot (cold start) | ~70ms |
+| Metric                   | Value   |
+| ------------------------ | ------- |
+| Single-shot (cold start) | ~70ms   |
 | Streaming `grab()` p50 | ~15.7ms |
-| Tone-map overhead | <0.5ms |
+| Tone-map overhead        | <0.5ms  |
 
 ## FAQ
 
@@ -175,14 +174,6 @@ When you want the exact same output as a non-HDR-aware screenshot tool — DWM's
 **When should I use `mode="hdr"`?**
 
 When you need the raw HDR pixel data for professional workflows (color grading, VFX compositing). Save as `.exr` or `.jxr` to preserve the full dynamic range.
-
-**Can I convert `rgba16f` frames to NumPy?**
-
-Not yet — `ndarray()` currently only supports `bgra8`. For HDR frames, use `save()` to write `.exr` or `.jxr` files.
-
-## Acknowledgements
-
-The HDR capture and tone-mapping pipeline references [OBS Studio](https://obsproject.com/)'s HDR handling logic.
 
 ## License
 
