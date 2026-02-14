@@ -5,6 +5,7 @@
 // - grab(): drain backlog and take last frame, suitable for continuous capture (lower latency)
 // Frame lifetime covers CopyResource, ensuring DWM won't overwrite the surface being read.
 
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -135,6 +136,9 @@ pub struct CapturePipeline {
     sdr_white_nits: f32,
     /// Whether the target monitor has HDR enabled (detected once at init).
     target_hdr: bool,
+    /// Prevent Send + Sync: pipeline holds thread-affine COM resources
+    /// (ID3D11DeviceContext) that must not cross thread boundaries.
+    _not_send_sync: PhantomData<*const ()>,
 }
 
 struct RawFrame {
@@ -227,6 +231,7 @@ impl CapturePipeline {
             tone_map_pass,
             sdr_white_nits,
             target_hdr,
+            _not_send_sync: PhantomData,
         })
     }
 

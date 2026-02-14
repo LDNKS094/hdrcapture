@@ -53,9 +53,12 @@ pub fn save_jxr(
     }
 
     // SAFETY: All WIC calls operate on COM objects created in this scope.
-    // COM is initialized per-call; CoInitializeEx returns S_FALSE if already init'd.
+    // CoInitializeEx returns Ok for S_OK and S_FALSE (already initialized).
+    // Err means incompatible apartment model (e.g. RPC_E_CHANGED_MODE).
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .context("COM initialization failed (apartment model conflict?)")?;
 
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)

@@ -19,19 +19,26 @@ use crate::pipeline;
 
 /// Release the GIL, execute a pure-Rust closure, then re-acquire the GIL.
 ///
-/// Equivalent to `py.detach()` but bypasses the `Ungil` (Send) bound.
-/// `CapturePipeline` holds Win32 HANDLE and COM pointers (not Send),
-/// but `Capture` is marked `unsendable`, guaranteeing single-thread usage.
+/// Bypasses pyo3's `Ungil` (Send) bound because `CapturePipeline` holds
+/// Win32 HANDLE and COM pointers that are not Send. This is safe because
+/// `Capture` is `#[pyclass(unsendable)]`, guaranteeing single-thread usage,
+/// and the closure executes synchronously — no non-Send types cross threads.
 ///
-/// Panics inside the closure are caught and converted to Python RuntimeError,
-/// ensuring the GIL is always restored.
+/// Panics inside the closure are caught via `catch_unwind` and converted to
+/// Python `RuntimeError`, ensuring the GIL is always restored regardless of
+/// whether the closure succeeds, fails, or panics.
 fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
-    // SAFETY: We release the GIL and re-acquire it on the same thread.
-    // The closure executes synchronously; no non-Send types cross threads.
+    // Keep `py` in scope so the borrow checker proves we hold the GIL token
+    // at both SaveThread and RestoreThread call sites.
+    let _py = py;
+
+    // SAFETY: SaveThread releases the GIL on the current thread.
+    // RestoreThread re-acquires it on the same thread unconditionally,
+    // even if the closure panicked (catch_unwind guarantees we reach it).
     let save = unsafe { pyo3::ffi::PyEval_SaveThread() };
     let result = std::panic::catch_unwind(AssertUnwindSafe(f));
     unsafe { pyo3::ffi::PyEval_RestoreThread(save) };
-    let _ = py;
+
     result.map_err(|panic| {
         let msg = if let Some(s) = panic.downcast_ref::<&str>() {
             format!("internal error: {}", s)
