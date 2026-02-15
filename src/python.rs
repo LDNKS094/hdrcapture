@@ -269,16 +269,18 @@ impl Capture {
     ///     process_name: Process name (e.g., "notepad.exe")
     ///     index: Window index for processes with the same name, defaults to 0
     ///     mode: Capture mode — "auto", "hdr", or "sdr"
+    ///     headless: Crop title bar and borders, defaults to true
     #[staticmethod]
-    #[pyo3(signature = (process_name, index=None, mode="auto"))]
+    #[pyo3(signature = (process_name, index=None, mode="auto", headless=true))]
     fn window(
         py: Python<'_>,
         process_name: &str,
         index: Option<usize>,
         mode: &str,
+        headless: bool,
     ) -> PyResult<Self> {
         let policy = parse_mode(mode)?;
-        let pipeline = pipeline::CapturePipeline::window(process_name, index, policy)
+        let pipeline = pipeline::CapturePipeline::window(process_name, index, policy, headless)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
         Ok(Self {
@@ -289,7 +291,9 @@ impl Capture {
     /// Whether the target monitor has HDR enabled.
     #[getter]
     fn is_hdr(&self) -> PyResult<bool> {
-        let p = self.pipeline.as_ref()
+        let p = self
+            .pipeline
+            .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))?;
         Ok(p.is_hdr())
     }
@@ -358,23 +362,27 @@ impl Capture {
 ///     window: Process name for window capture (e.g., "notepad.exe")
 ///     window_index: Window index for processes with the same name, defaults to 0
 ///     mode: Capture mode — "auto", "hdr", or "sdr"
+///     headless: Crop title bar and borders for window capture, defaults to true
 ///
 /// Returns:
 ///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
-#[pyo3(signature = (monitor=0, window=None, window_index=None, mode="auto"))]
+#[pyo3(signature = (monitor=0, window=None, window_index=None, mode="auto", headless=true))]
 fn screenshot(
     py: Python<'_>,
     monitor: usize,
     window: Option<&str>,
     window_index: Option<usize>,
     mode: &str,
+    headless: bool,
 ) -> PyResult<CapturedFrame> {
     let policy = parse_mode(mode)?;
 
     // Create pipeline (releases GIL during D3D11/WGC init)
     let mut pipe = detach_gil(py, || match window {
-        Some(process_name) => pipeline::CapturePipeline::window(process_name, window_index, policy),
+        Some(process_name) => {
+            pipeline::CapturePipeline::window(process_name, window_index, policy, headless)
+        }
         None => pipeline::CapturePipeline::monitor(monitor, policy),
     })?
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;

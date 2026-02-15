@@ -5,14 +5,14 @@ import time
 def main():
     st = time.perf_counter()
     try:
-        with hc.capture.window("endfield.exe", index=0) as cap:
+        with hc.capture.window("notepad.exe", index=0) as cap:
             counter = 0
             while True:
-                cap.capture().save(f"tests/test/test_endfield_{counter}.png")
+                cap.capture().save(f"tests/test/test_notepad_{counter}.png")
                 time.sleep(0.5)
-                counter += 1
                 ed = time.perf_counter()
-                print(f"Using {(ed-st)*1000:.2f}ms")
+                print(f"Using {(ed-st)*1000:.2f}ms saving index {counter}")
+                counter += 1
                 st = ed
             
     except RuntimeError as e:

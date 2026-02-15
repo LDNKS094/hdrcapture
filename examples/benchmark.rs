@@ -101,7 +101,9 @@ fn create_pipeline(target: &Target) -> Option<CapturePipeline> {
             CapturePipeline::monitor(*idx, CapturePolicy::Auto)
                 .expect("Failed to create monitor pipeline"),
         ),
-        Target::Window(name) => CapturePipeline::window(name, Some(0), CapturePolicy::Auto).ok(),
+        Target::Window(name) => {
+            CapturePipeline::window(name, Some(0), CapturePolicy::Auto, true).ok()
+        }
     }
 }
 

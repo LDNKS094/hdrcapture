@@ -141,6 +141,8 @@ pub struct CapturePipeline {
     sdr_white_nits: f32,
     /// Whether the target monitor has HDR enabled (detected once at init).
     target_hdr: bool,
+    /// Crop to client area in window capture (remove title bar / borders).
+    headless: bool,
     /// Cached crop texture for client area cropping (window capture only).
     /// Rebuilt when dimensions or format change.
     crop_texture: Option<CropCache>,
@@ -191,13 +193,24 @@ impl CapturePipeline {
         enable_dpi_awareness();
         let hmonitor = find_monitor(index)?;
         let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
-        Self::new(CaptureTarget::Monitor(hmonitor), policy, sdr_white_nits)
+        Self::new(
+            CaptureTarget::Monitor(hmonitor),
+            policy,
+            sdr_white_nits,
+            false,
+        )
     }
 
     /// Create window capture pipeline by process name
     ///
     /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
-    pub fn window(process_name: &str, index: Option<usize>, policy: CapturePolicy) -> Result<Self> {
+    /// `headless` controls whether to crop the title bar and borders (default: true).
+    pub fn window(
+        process_name: &str,
+        index: Option<usize>,
+        policy: CapturePolicy,
+        headless: bool,
+    ) -> Result<Self> {
         enable_dpi_awareness();
         let hwnd = find_window(process_name, index)?;
         let hmonitor = unsafe {
@@ -207,10 +220,20 @@ impl CapturePipeline {
             )
         };
         let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
-        Self::new(CaptureTarget::Window(hwnd), policy, sdr_white_nits)
+        Self::new(
+            CaptureTarget::Window(hwnd),
+            policy,
+            sdr_white_nits,
+            headless,
+        )
     }
 
-    fn new(target: CaptureTarget, policy: CapturePolicy, sdr_white_nits: f32) -> Result<Self> {
+    fn new(
+        target: CaptureTarget,
+        policy: CapturePolicy,
+        sdr_white_nits: f32,
+        headless: bool,
+    ) -> Result<Self> {
         let d3d_ctx = create_d3d11_device()?;
         let capture = init_capture(&d3d_ctx, target, policy)?;
         let target_hdr = capture.is_hdr();
@@ -249,6 +272,7 @@ impl CapturePipeline {
             tone_map_pass,
             sdr_white_nits,
             target_hdr,
+            headless,
             crop_texture: None,
             force_fresh: false,
             _not_send_sync: PhantomData,
@@ -330,7 +354,11 @@ impl CapturePipeline {
                 return Ok(None);
             }
 
-            let client_box = geometry.and_then(|g| g.client_box);
+            let client_box = if self.headless {
+                geometry.and_then(|g| g.client_box)
+            } else {
+                None
+            };
             return self.read_raw_frame(&current, client_box).map(Some);
         }
 

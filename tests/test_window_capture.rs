@@ -30,8 +30,13 @@ fn test_capture_target_window() {
         return;
     }
 
-    let mut pipeline =
-        CapturePipeline::window(TARGET_PROCESS, Some(TARGET_INDEX), CapturePolicy::Auto).unwrap();
+    let mut pipeline = CapturePipeline::window(
+        TARGET_PROCESS,
+        Some(TARGET_INDEX),
+        CapturePolicy::Auto,
+        true,
+    )
+    .unwrap();
     let frame = pipeline.capture().unwrap();
 
     assert!(frame.width > 0 && frame.height > 0);
