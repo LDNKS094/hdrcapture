@@ -140,6 +140,9 @@ pub struct CapturePipeline {
     /// Cached crop texture for client area cropping (window capture only).
     /// Rebuilt when dimensions or format change.
     crop_texture: Option<CropCache>,
+    /// Pending frame pool recreation target size (source texture dimensions).
+    /// Applied after current frame has been fully processed.
+    pending_recreate: Option<(u32, u32)>,
     /// Prevent Send + Sync: pipeline holds thread-affine COM resources
     /// (ID3D11DeviceContext) that must not cross thread boundaries.
     _not_send_sync: PhantomData<*const ()>,
@@ -161,6 +164,13 @@ struct RawFrame {
 }
 
 impl CapturePipeline {
+    fn apply_pending_recreate(&mut self) -> Result<()> {
+        if let Some((width, height)) = self.pending_recreate.take() {
+            self.capture.recreate_frame_pool(width, height)?;
+        }
+        Ok(())
+    }
+
     fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
         let bpp = match format {
             ColorPixelFormat::Bgra8 => 4,
@@ -243,6 +253,7 @@ impl CapturePipeline {
             sdr_white_nits,
             target_hdr,
             crop_texture: None,
+            pending_recreate: None,
             _not_send_sync: PhantomData,
         })
     }
@@ -334,16 +345,15 @@ impl CapturePipeline {
 
     /// Extract texture and metadata from WGC frame.
     ///
+    /// Returns `None` if a resize was detected — the current frame and all
+    /// stale frames have been discarded, the next frame will be at the new size.
+    ///
     /// For window capture, crops to client area (removes title bar and borders)
     /// using `CopySubresourceRegion` on the GPU.
     fn read_raw_frame(
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
     ) -> Result<RawFrame> {
-        // Check for resize and recreate frame pool if needed
-        self.capture.check_resize(frame)?;
-
-        // Extract timestamp (SystemRelativeTime, 100ns precision, converted to seconds)
         let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
 
         let source_texture = WGCCapture::frame_to_texture(frame)?;
@@ -355,6 +365,18 @@ impl CapturePipeline {
         };
         let color_format = Self::color_format(format)?;
 
+        // Defer FramePool recreate until current frame is fully processed.
+        // Use ContentSize only for pool resize trigger (OBS-style), while texture
+        // desc remains the source of truth for current-frame processing.
+        if let Ok(content_size) = frame.ContentSize() {
+            let new_w = content_size.Width as u32;
+            let new_h = content_size.Height as u32;
+            let (pool_w, pool_h) = self.capture.pool_size();
+            if new_w > 0 && new_h > 0 && (new_w != pool_w || new_h != pool_h) {
+                self.pending_recreate = Some((new_w, new_h));
+            }
+        }
+
         // For window capture: crop to client area (remove title bar / borders)
         if let Some(client_box) = self.capture.get_client_box(src_width, src_height) {
             let crop_w = client_box.right - client_box.left;
@@ -365,9 +387,16 @@ impl CapturePipeline {
             // SAFETY: Both textures are valid D3D11 resources with compatible formats.
             // CopySubresourceRegion copies the client_box region from source to (0,0) of dest.
             unsafe {
-                self._d3d_ctx
-                    .context
-                    .CopySubresourceRegion(&cropped, 0, 0, 0, 0, &source_texture, 0, Some(&client_box));
+                self._d3d_ctx.context.CopySubresourceRegion(
+                    &cropped,
+                    0,
+                    0,
+                    0,
+                    0,
+                    &source_texture,
+                    0,
+                    Some(&client_box),
+                );
             }
 
             return Ok(RawFrame {
@@ -438,6 +467,7 @@ impl CapturePipeline {
             format,
         };
         self.cached_frame = Some(output.clone());
+        self.apply_pending_recreate()?;
         Ok(output)
     }
 
@@ -473,24 +503,22 @@ impl CapturePipeline {
 
         // Try to get a fresh frame with short timeout
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
-            // New frame arrived — use it (discard fallback if any)
             let raw = self.read_raw_frame(&fresh)?;
             return self.process_and_cache(raw);
         }
 
-        // Timeout — screen is likely static
+        // Timeout — try fallback
         if let Some(fb) = fallback {
-            // Use the last drained frame (most recent available)
             let raw = self.read_raw_frame(&fb)?;
             return self.process_and_cache(raw);
         }
 
-        // Pool was empty AND no new frame — use cached data
+        // Use cached data
         if self.cached_frame.is_some() {
             return self.build_cached_frame();
         }
 
-        // No cache either — true cold start edge case, full timeout
+        // No cache — full timeout
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
         let raw = self.read_raw_frame(&frame)?;
         self.process_and_cache(raw)
@@ -530,12 +558,12 @@ impl CapturePipeline {
             return self.process_and_cache(raw);
         }
 
-        // Timeout — screen is likely static, use cached data
+        // Timeout — use cached data
         if self.cached_frame.is_some() {
             return self.build_cached_frame();
         }
 
-        // No cache — full timeout (should not happen in normal usage)
+        // No cache — full timeout
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
         let raw = self.read_raw_frame(&frame)?;
         self.process_and_cache(raw)

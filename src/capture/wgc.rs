@@ -13,6 +13,7 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 use windows::Graphics::DirectX::DirectXPixelFormat;
+use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Texture2D, D3D11_BOX};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
@@ -80,24 +81,28 @@ impl WGCCapture {
         (self.pool_width, self.pool_height)
     }
 
-    /// Check if the frame's content size differs from the pool size.
-    /// If so, recreate the frame pool. Call once per frame before extracting the texture.
-    pub fn check_resize(&mut self, frame: &Direct3D11CaptureFrame) -> Result<()> {
-        let content_size = frame.ContentSize()?;
-        let new_w = content_size.Width as u32;
-        let new_h = content_size.Height as u32;
-
-        if new_w != self.pool_width || new_h != self.pool_height {
-            self.frame_pool.Recreate(
-                &self.direct3d_device,
-                self.pixel_format,
-                2,
-                content_size,
-            )?;
-            self.pool_width = new_w;
-            self.pool_height = new_h;
+    /// Recreate frame pool when source texture size changed.
+    ///
+    /// Returns `true` if pool was recreated.
+    pub fn recreate_frame_pool(&mut self, width: u32, height: u32) -> Result<bool> {
+        if width == self.pool_width && height == self.pool_height {
+            return Ok(false);
         }
-        Ok(())
+
+        let new_size = SizeInt32 {
+            Width: width as i32,
+            Height: height as i32,
+        };
+
+        self.frame_pool
+            .Recreate(&self.direct3d_device, self.pixel_format, 2, new_size)?;
+        self.pool_width = width;
+        self.pool_height = height;
+
+        // Drain stale frames from pre-recreate generation.
+        while self.frame_pool.TryGetNextFrame().is_ok() {}
+
+        Ok(true)
     }
 
     /// Whether the target monitor has HDR enabled.
