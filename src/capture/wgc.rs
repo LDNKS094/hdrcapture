@@ -81,6 +81,72 @@ impl WGCCapture {
         (self.pool_width, self.pool_height)
     }
 
+    /// Returns true when this capture target is a window.
+    pub fn is_window_target(&self) -> bool {
+        self.window_handle.is_some()
+    }
+
+    /// Returns current window client size in physical pixels.
+    ///
+    /// Returns None for monitor capture, minimized windows, or API failure.
+    pub fn client_size(&self) -> Option<(u32, u32)> {
+        let hwnd = self.window_handle?;
+
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+
+            let mut client_rect = RECT::default();
+            if GetClientRect(hwnd, &mut client_rect).is_err() {
+                return None;
+            }
+
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+
+            if client_rect.right <= 0 || client_rect.bottom <= 0 {
+                return None;
+            }
+
+            Some((client_rect.right as u32, client_rect.bottom as u32))
+        }
+    }
+
+    /// Returns current window capture surface size (extended frame bounds).
+    ///
+    /// This matches WGC's window surface dimensions better than client size.
+    pub fn window_frame_size(&self) -> Option<(u32, u32)> {
+        let hwnd = self.window_handle?;
+
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+
+            let mut window_rect = RECT::default();
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut window_rect as *mut _ as *mut _,
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_err()
+            {
+                return None;
+            }
+
+            let width = window_rect.right - window_rect.left;
+            let height = window_rect.bottom - window_rect.top;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+
+            Some((width as u32, height as u32))
+        }
+    }
+
     /// Recreate frame pool when source texture size changed.
     ///
     /// Returns `true` if pool was recreated.

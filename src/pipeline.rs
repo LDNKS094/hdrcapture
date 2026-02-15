@@ -258,6 +258,16 @@ impl CapturePipeline {
         &self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
     ) -> Result<Option<(u32, u32)>> {
+        if self.capture.is_window_target() {
+            if let Some((frame_w, frame_h)) = self.capture.window_frame_size() {
+                let (pool_w, pool_h) = self.capture.pool_size();
+                if frame_w != pool_w || frame_h != pool_h {
+                    return Ok(Some((frame_w, frame_h)));
+                }
+            }
+            return Ok(None);
+        }
+
         let content_size = frame.ContentSize()?;
         let new_w = content_size.Width as u32;
         let new_h = content_size.Height as u32;
@@ -289,6 +299,7 @@ impl CapturePipeline {
                     self.force_fresh = true;
                 }
                 self.capture.recreate_frame_pool(new_w, new_h)?;
+                // NOTE: temporarily disable post-recreate first-frame drop.
                 drop_next = true;
 
                 if let Some(next) = self.try_wait_frame(timeout)? {
@@ -299,8 +310,7 @@ impl CapturePipeline {
                 return Ok(None);
             }
 
-            // Recreate just happened and this is the first stable-size frame.
-            // Discard it once to avoid resize transition artifacts.
+            // NOTE: temporarily disable post-recreate first-frame drop.
             if drop_next {
                 drop_next = false;
                 if let Some(next) = self.try_wait_frame(timeout)? {
