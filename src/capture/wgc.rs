@@ -86,34 +86,6 @@ impl WGCCapture {
         self.window_handle.is_some()
     }
 
-    /// Returns current window client size in physical pixels.
-    ///
-    /// Returns None for monitor capture, minimized windows, or API failure.
-    pub fn client_size(&self) -> Option<(u32, u32)> {
-        let hwnd = self.window_handle?;
-
-        unsafe {
-            if IsIconic(hwnd).as_bool() {
-                return None;
-            }
-
-            let mut client_rect = RECT::default();
-            if GetClientRect(hwnd, &mut client_rect).is_err() {
-                return None;
-            }
-
-            if IsIconic(hwnd).as_bool() {
-                return None;
-            }
-
-            if client_rect.right <= 0 || client_rect.bottom <= 0 {
-                return None;
-            }
-
-            Some((client_rect.right as u32, client_rect.bottom as u32))
-        }
-    }
-
     /// Returns current window capture surface size (extended frame bounds).
     ///
     /// This matches WGC's window surface dimensions better than client size.
