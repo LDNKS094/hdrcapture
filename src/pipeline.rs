@@ -12,13 +12,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
 };
 
-use crate::capture::wgc::{CaptureTarget, WGCCapture};
+use crate::capture::wgc::{CaptureTarget, WGCCapture, WindowGeometry};
 pub use crate::capture::CapturePolicy;
 use crate::capture::{enable_dpi_awareness, find_monitor, find_window, init_capture};
 use crate::color::white_level;
@@ -254,15 +255,20 @@ impl CapturePipeline {
         })
     }
 
+    /// Check if frame pool needs recreation due to size change.
+    ///
+    /// For window targets, uses pre-queried geometry when available to avoid
+    /// redundant Win32 API calls. For monitor targets, uses frame ContentSize.
     fn needs_recreate(
         &self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+        geometry: Option<&WindowGeometry>,
     ) -> Result<Option<(u32, u32)>> {
         if self.capture.is_window_target() {
-            if let Some((frame_w, frame_h)) = self.capture.window_frame_size() {
+            if let Some(geo) = geometry {
                 let (pool_w, pool_h) = self.capture.pool_size();
-                if frame_w != pool_w || frame_h != pool_h {
-                    return Ok(Some((frame_w, frame_h)));
+                if geo.frame_width != pool_w || geo.frame_height != pool_h {
+                    return Ok(Some((geo.frame_width, geo.frame_height)));
                 }
             }
             return Ok(None);
@@ -294,7 +300,11 @@ impl CapturePipeline {
         let mut drop_next = false;
 
         for _ in 0..RESIZE_RETRY_LIMIT {
-            if let Some((new_w, new_h)) = self.needs_recreate(&current)? {
+            // Query window geometry once per iteration (used for both resize check and crop).
+            let (pool_w, pool_h) = self.capture.pool_size();
+            let geometry = self.capture.window_geometry(pool_w, pool_h);
+
+            if let Some((new_w, new_h)) = self.needs_recreate(&current, geometry.as_ref())? {
                 if mark_grab_sync {
                     self.force_fresh = true;
                 }
@@ -320,7 +330,8 @@ impl CapturePipeline {
                 return Ok(None);
             }
 
-            return self.read_raw_frame(&current).map(Some);
+            let client_box = geometry.and_then(|g| g.client_box);
+            return self.read_raw_frame(&current, client_box).map(Some);
         }
 
         Ok(None)
@@ -415,9 +426,11 @@ impl CapturePipeline {
     ///
     /// For window capture, crops to client area (removes title bar and borders)
     /// using `CopySubresourceRegion` on the GPU.
+    /// `client_box` is pre-computed from `window_geometry()` to avoid redundant Win32 queries.
     fn read_raw_frame(
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+        client_box: Option<D3D11_BOX>,
     ) -> Result<RawFrame> {
         let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
 
@@ -431,7 +444,7 @@ impl CapturePipeline {
         let color_format = Self::color_format(format)?;
 
         // For window capture: crop to client area (remove title bar / borders)
-        if let Some(client_box) = self.capture.get_client_box(src_width, src_height) {
+        if let Some(client_box) = client_box {
             let crop_w = client_box.right - client_box.left;
             let crop_h = client_box.bottom - client_box.top;
 
