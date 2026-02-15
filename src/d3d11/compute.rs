@@ -152,8 +152,8 @@ pub fn dispatch(
     width: u32,
     height: u32,
 ) {
-    let groups_x = (width + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
-    let groups_y = (height + THREAD_GROUP_SIZE - 1) / THREAD_GROUP_SIZE;
+    let groups_x = width.div_ceil(THREAD_GROUP_SIZE);
+    let groups_y = height.div_ceil(THREAD_GROUP_SIZE);
 
     // SAFETY: All COM objects are valid. Bind → Dispatch → Unbind is the
     // standard D3D11 compute pattern. Unbinding prevents resource hazards.

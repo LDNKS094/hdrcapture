@@ -79,7 +79,7 @@ fn save_rgba16f(path: &Path, data: &[u8], w: usize, h: usize) -> Result<()> {
 /// Panics if the byte slice length is not a multiple of 2 or is misaligned.
 fn bytemuck_cast_f16(data: &[u8]) -> &[f16] {
     assert!(
-        data.len() % 2 == 0,
+        data.len().is_multiple_of(2),
         "byte slice length must be even for f16 cast"
     );
     // SAFETY: f16 is 2 bytes, repr(transparent) over u16. The exr crate re-exports `half::f16`.
