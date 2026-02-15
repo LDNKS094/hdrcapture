@@ -29,6 +29,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D_Fxc",
     # WIC (JPEG XR encoding)
     "Win32_Graphics_Imaging",
+    # DWM (client area bounds query)
+    "Win32_Graphics_Dwm",
     # COM runtime
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

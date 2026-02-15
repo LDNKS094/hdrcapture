@@ -13,14 +13,16 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DSurface;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT, RECT};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Texture2D, D3D11_BOX};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
 use windows::Win32::Graphics::Dxgi::IDXGIOutput6;
 use windows::Win32::Graphics::Gdi::{MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
 
 use super::policy::CapturePolicy;
 use crate::d3d11::D3D11Context;
@@ -59,6 +61,8 @@ pub struct WGCCapture {
     target_height: u32,
     /// Whether the target monitor has HDR enabled (detected once at init)
     target_hdr: bool,
+    /// Window handle for client area cropping (None for monitor capture)
+    window_handle: Option<HWND>,
 }
 
 impl WGCCapture {
@@ -102,6 +106,99 @@ impl WGCCapture {
             );
         }
         Ok(())
+    }
+
+    /// Compute the client area crop box for window capture.
+    ///
+    /// Returns `Some(D3D11_BOX)` describing the client area region within the
+    /// captured texture, or `None` for monitor capture / minimized windows /
+    /// if the calculation fails.
+    ///
+    /// Uses the OBS approach: `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`
+    /// for the actual window rect (excludes invisible shadow padding), then
+    /// `ClientToScreen` to find the client area offset within that rect.
+    pub fn get_client_box(&self, texture_width: u32, texture_height: u32) -> Option<D3D11_BOX> {
+        let hwnd = self.window_handle?;
+
+        // SAFETY: Win32 API calls with valid HWND. IsIconic, GetClientRect,
+        // DwmGetWindowAttribute, ClientToScreen all read window state atomically.
+        unsafe {
+            // Skip if minimized (check twice, ABA unlikely)
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+
+            let mut client_rect = RECT::default();
+            if GetClientRect(hwnd, &mut client_rect).is_err() {
+                return None;
+            }
+
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+
+            if client_rect.right <= 0 || client_rect.bottom <= 0 {
+                return None;
+            }
+
+            let mut window_rect = RECT::default();
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut window_rect as *mut _ as *mut _,
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_err()
+            {
+                return None;
+            }
+
+            let mut upper_left = POINT { x: 0, y: 0 };
+            if !windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut upper_left).as_bool() {
+                return None;
+            }
+
+            let left = if upper_left.x > window_rect.left {
+                (upper_left.x - window_rect.left) as u32
+            } else {
+                0
+            };
+
+            let top = if upper_left.y > window_rect.top {
+                (upper_left.y - window_rect.top) as u32
+            } else {
+                0
+            };
+
+            let texture_w = if texture_width > left {
+                (texture_width - left).min(client_rect.right as u32)
+            } else {
+                1
+            };
+
+            let texture_h = if texture_height > top {
+                (texture_height - top).min(client_rect.bottom as u32)
+            } else {
+                1
+            };
+
+            let right = left + texture_w;
+            let bottom = top + texture_h;
+
+            // Validate box fits within texture
+            if right > texture_width || bottom > texture_height {
+                return None;
+            }
+
+            Some(D3D11_BOX {
+                left,
+                top,
+                front: 0,
+                right,
+                bottom,
+                back: 1,
+            })
+        }
     }
 
     /// Extract `ID3D11Texture2D` from `Direct3D11CaptureFrame`
@@ -239,6 +336,11 @@ pub fn init_capture(
     let session = frame_pool.CreateCaptureSession(&item)?;
     session.SetIsBorderRequired(false)?;
 
+    let window_handle = match target {
+        CaptureTarget::Window(hwnd) => Some(hwnd),
+        CaptureTarget::Monitor(_) => None,
+    };
+
     Ok(WGCCapture {
         _item: item,
         frame_pool,
@@ -249,6 +351,7 @@ pub fn init_capture(
         target_width: size.Width as u32,
         target_height: size.Height as u32,
         target_hdr: is_hdr,
+        window_handle,
     })
 }
 
