@@ -1,11 +1,12 @@
-# build_all.ps1 — Release build, maturin develop for each venv, run all tests.
+# build_all.ps1 — Release build + maturin wheel for each Python version + Rust tests.
 #
 # Usage:
 #   .\scripts\build_all.ps1            # full pipeline
-#   .\scripts\build_all.ps1 -SkipRust  # skip cargo build/test, only Python
+#   .\scripts\build_all.ps1 -SkipRust  # skip cargo build/test, only maturin wheels
 #
-# Requires: cargo, rustfmt
+# Requires: cargo, rustfmt, maturin
 # Python venvs: .venv (3.12), .venv313 (3.13) — must already exist in project root.
+# Output: target/wheels/*.whl
 
 param(
     [switch]$SkipRust
@@ -17,10 +18,10 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Failed = @()
 
-# Hardcoded venvs: name → directory
+# Hardcoded venvs: name → python executable
 $Venvs = [ordered]@{
-    "py312" = Join-Path $ProjectRoot ".venv"
-    "py313" = Join-Path $ProjectRoot ".venv313"
+    "py312" = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    "py313" = Join-Path $ProjectRoot ".venv313\Scripts\python.exe"
 }
 
 function Write-Step($msg) {
@@ -66,47 +67,33 @@ if (-not $SkipRust) {
 }
 
 # ------------------------------------------------------------------
-# 2. Python: maturin develop + python tests per venv
+# 2. maturin build: one wheel per Python version
 # ------------------------------------------------------------------
 foreach ($entry in $Venvs.GetEnumerator()) {
     $tag = $entry.Key
-    $venvDir = $entry.Value
-    $venvPython = Join-Path $venvDir "Scripts\python.exe"
-    $maturin = Join-Path $venvDir "Scripts\maturin.exe"
+    $pyExe = $entry.Value
+    $venvDir = Split-Path -Parent (Split-Path -Parent $pyExe)
 
-    Write-Step "$tag"
+    Write-Step "maturin build ($tag)"
 
-    if (-not (Test-Path $venvPython)) {
-        Write-Fail "venv not found: $venvDir"
-        $Failed += "$tag venv missing"
+    if (-not (Test-Path $pyExe)) {
+        Write-Fail "python not found: $pyExe"
+        $Failed += "$tag missing"
         continue
     }
 
-    $pyVer = & $venvPython --version 2>&1
+    $pyVer = & $pyExe --version 2>&1
     Write-Host "  $pyVer"
 
-    # maturin develop --release
-    Write-Host "  maturin develop --release ..."
-    & $maturin develop --release
+    $env:VIRTUAL_ENV = $venvDir
+    & maturin build --release -i $pyExe
+    $env:VIRTUAL_ENV = $null
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail "maturin develop ($tag)"
+        Write-Fail "maturin build ($tag)"
         $Failed += "$tag maturin"
         continue
     }
-    Write-Ok "maturin develop ($tag)"
-
-    # Run Python tests
-    $testScript = Join-Path $ProjectRoot "tests\test_capture.py"
-    if (Test-Path $testScript) {
-        Write-Host "  Running tests/test_capture.py ..."
-        & $venvPython $testScript
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "python tests ($tag)"
-            $Failed += "$tag python tests"
-        } else {
-            Write-Ok "python tests ($tag)"
-        }
-    }
+    Write-Ok "maturin build ($tag)"
 }
 
 # ------------------------------------------------------------------
