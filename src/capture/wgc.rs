@@ -56,13 +56,16 @@ pub struct WGCCapture {
     frame_event: HANDLE,
     /// Indicates teardown has started (callback should stop signaling)
     shutting_down: Arc<AtomicBool>,
-    /// Initial size of capture target (for pre-creating Staging Texture)
-    target_width: u32,
-    target_height: u32,
+    /// Current pool size (updated on Recreate)
+    pool_width: u32,
+    pool_height: u32,
     /// Whether the target monitor has HDR enabled (detected once at init)
     target_hdr: bool,
     /// Window handle for client area cropping (None for monitor capture)
     window_handle: Option<HWND>,
+    /// Stored for frame pool Recreate()
+    direct3d_device: windows::Graphics::DirectX::Direct3D11::IDirect3DDevice,
+    pixel_format: DirectXPixelFormat,
 }
 
 impl WGCCapture {
@@ -72,9 +75,29 @@ impl WGCCapture {
         Ok(())
     }
 
-    /// Initial size of capture target
-    pub fn target_size(&self) -> (u32, u32) {
-        (self.target_width, self.target_height)
+    /// Current pool size (may change after resize detection)
+    pub fn pool_size(&self) -> (u32, u32) {
+        (self.pool_width, self.pool_height)
+    }
+
+    /// Check if the frame's content size differs from the pool size.
+    /// If so, recreate the frame pool. Call once per frame before extracting the texture.
+    pub fn check_resize(&mut self, frame: &Direct3D11CaptureFrame) -> Result<()> {
+        let content_size = frame.ContentSize()?;
+        let new_w = content_size.Width as u32;
+        let new_h = content_size.Height as u32;
+
+        if new_w != self.pool_width || new_h != self.pool_height {
+            self.frame_pool.Recreate(
+                &self.direct3d_device,
+                self.pixel_format,
+                2,
+                content_size,
+            )?;
+            self.pool_width = new_w;
+            self.pool_height = new_h;
+        }
+        Ok(())
     }
 
     /// Whether the target monitor has HDR enabled.
@@ -348,10 +371,12 @@ pub fn init_capture(
         frame_arrived_token,
         frame_event,
         shutting_down,
-        target_width: size.Width as u32,
-        target_height: size.Height as u32,
+        pool_width: size.Width as u32,
+        pool_height: size.Height as u32,
         target_hdr: is_hdr,
         window_handle,
+        direct3d_device: d3d_ctx.direct3d_device.clone(),
+        pixel_format,
     })
 }
 

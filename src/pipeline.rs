@@ -213,7 +213,7 @@ impl CapturePipeline {
 
         // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback.
         // Hdr mode outputs R16G16B16A16_FLOAT (8 bpp); Auto/Sdr output BGRA8 (4 bpp).
-        let (w, h) = capture.target_size();
+        let (w, h) = capture.pool_size();
         let (staging_format, bpp) = if policy == CapturePolicy::Hdr {
             (DXGI_FORMAT_R16G16B16A16_FLOAT, 8)
         } else {
@@ -340,6 +340,9 @@ impl CapturePipeline {
         &mut self,
         frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
     ) -> Result<RawFrame> {
+        // Check for resize and recreate frame pool if needed
+        self.capture.check_resize(frame)?;
+
         // Extract timestamp (SystemRelativeTime, 100ns precision, converted to seconds)
         let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
 
