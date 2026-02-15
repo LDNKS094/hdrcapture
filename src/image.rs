@@ -30,6 +30,13 @@ pub fn save(
     height: u32,
     format: ColorPixelFormat,
 ) -> Result<()> {
+    // Auto-create parent directories if they don't exist
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
