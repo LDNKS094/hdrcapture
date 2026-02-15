@@ -8,7 +8,7 @@ def main():
         with hc.capture.window("endfield.exe", index=0) as cap:
             counter = 0
             while True:
-                cap.capture().save(f"tests/test/test_endfield_{counter}.png")
+                cap.grab().save(f"tests/test/test_endfield_{counter}.png")
                 time.sleep(0.5)
                 counter += 1
                 ed = time.perf_counter()
