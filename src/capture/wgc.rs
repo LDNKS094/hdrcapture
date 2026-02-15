@@ -312,6 +312,25 @@ impl Drop for WGCCapture {
 // Capture initialization
 // ---------------------------------------------------------------------------
 
+/// Try to disable the yellow capture border (best-effort).
+///
+/// Uses WinRT `ApiInformation` to check if `IsBorderRequired` exists before
+/// calling it. Silently does nothing on Windows 10 1903/1909 where the
+/// property is absent — the yellow border stays visible (cosmetic only).
+fn try_disable_border(session: &GraphicsCaptureSession) {
+    use windows::Foundation::Metadata::ApiInformation;
+
+    let supported = ApiInformation::IsPropertyPresent(
+        &windows::core::HSTRING::from("Windows.Graphics.Capture.GraphicsCaptureSession"),
+        &windows::core::HSTRING::from("IsBorderRequired"),
+    )
+    .unwrap_or(false);
+
+    if supported {
+        let _ = session.SetIsBorderRequired(false);
+    }
+}
+
 /// Create GraphicsCaptureItem from monitor handle
 fn create_capture_item_for_monitor(hmonitor: HMONITOR) -> Result<GraphicsCaptureItem> {
     // SAFETY: factory function call, failure may mean system not supported or COM not initialized
@@ -407,7 +426,12 @@ pub fn init_capture(
     }))?;
 
     let session = frame_pool.CreateCaptureSession(&item)?;
-    session.SetIsBorderRequired(false)?;
+    // Best-effort: hide the yellow capture border.
+    // Requires Windows 10 2004+ (IGraphicsCaptureSession2). On 1903/1909 the
+    // property doesn't exist and the border stays visible — cosmetic only.
+    // Uses WinRT ApiInformation to detect availability at runtime, matching
+    // the approach used by OBS Studio.
+    try_disable_border(&session);
 
     let window_handle = match target {
         CaptureTarget::Window(hwnd) => Some(hwnd),

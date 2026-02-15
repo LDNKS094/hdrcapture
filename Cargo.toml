@@ -20,6 +20,8 @@ windows = { version = "0.62", features = [
     "Graphics_Capture",
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
+    # WinRT API feature detection
+    "Foundation_Metadata",
     # Win32 Direct3D
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
