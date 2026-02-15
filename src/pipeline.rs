@@ -34,6 +34,9 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 /// When screen is active, new frame arrives within 1 VSync; timeout indicates static screen, fallback should be used.
 const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// Maximum retries when resize keeps changing during transition.
+const RESIZE_RETRY_LIMIT: usize = 3;
+
 /// Single frame capture result
 #[derive(Clone)]
 pub struct CapturedFrame {
@@ -140,9 +143,6 @@ pub struct CapturePipeline {
     /// Cached crop texture for client area cropping (window capture only).
     /// Rebuilt when dimensions or format change.
     crop_texture: Option<CropCache>,
-    /// Pending frame pool recreation target size (source texture dimensions).
-    /// Applied after current frame has been fully processed.
-    pending_recreate: Option<(u32, u32)>,
     /// Prevent Send + Sync: pipeline holds thread-affine COM resources
     /// (ID3D11DeviceContext) that must not cross thread boundaries.
     _not_send_sync: PhantomData<*const ()>,
@@ -164,13 +164,6 @@ struct RawFrame {
 }
 
 impl CapturePipeline {
-    fn apply_pending_recreate(&mut self) -> Result<()> {
-        if let Some((width, height)) = self.pending_recreate.take() {
-            self.capture.recreate_frame_pool(width, height)?;
-        }
-        Ok(())
-    }
-
     fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
         let bpp = match format {
             ColorPixelFormat::Bgra8 => 4,
@@ -253,9 +246,53 @@ impl CapturePipeline {
             sdr_white_nits,
             target_hdr,
             crop_texture: None,
-            pending_recreate: None,
             _not_send_sync: PhantomData,
         })
+    }
+
+    fn needs_recreate(
+        &self,
+        frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+    ) -> Result<Option<(u32, u32)>> {
+        let content_size = frame.ContentSize()?;
+        let new_w = content_size.Width as u32;
+        let new_h = content_size.Height as u32;
+
+        if new_w == 0 || new_h == 0 {
+            return Ok(None);
+        }
+
+        let (pool_w, pool_h) = self.capture.pool_size();
+        if new_w != pool_w || new_h != pool_h {
+            return Ok(Some((new_w, new_h)));
+        }
+
+        Ok(None)
+    }
+
+    fn resolve_frame_after_resize(
+        &mut self,
+        frame: windows::Graphics::Capture::Direct3D11CaptureFrame,
+        timeout: Duration,
+    ) -> Result<Option<RawFrame>> {
+        let mut current = frame;
+
+        for _ in 0..RESIZE_RETRY_LIMIT {
+            if let Some((new_w, new_h)) = self.needs_recreate(&current)? {
+                self.capture.recreate_frame_pool(new_w, new_h)?;
+
+                if let Some(next) = self.try_wait_frame(timeout)? {
+                    current = next;
+                    continue;
+                }
+
+                return Ok(None);
+            }
+
+            return self.read_raw_frame(&current).map(Some);
+        }
+
+        Ok(None)
     }
 
     /// Wait for the next frame from the pool, with timeout.
@@ -345,9 +382,6 @@ impl CapturePipeline {
 
     /// Extract texture and metadata from WGC frame.
     ///
-    /// Returns `None` if a resize was detected — the current frame and all
-    /// stale frames have been discarded, the next frame will be at the new size.
-    ///
     /// For window capture, crops to client area (removes title bar and borders)
     /// using `CopySubresourceRegion` on the GPU.
     fn read_raw_frame(
@@ -364,18 +398,6 @@ impl CapturePipeline {
             (desc.Width, desc.Height, desc.Format)
         };
         let color_format = Self::color_format(format)?;
-
-        // Defer FramePool recreate until current frame is fully processed.
-        // Use ContentSize only for pool resize trigger (OBS-style), while texture
-        // desc remains the source of truth for current-frame processing.
-        if let Ok(content_size) = frame.ContentSize() {
-            let new_w = content_size.Width as u32;
-            let new_h = content_size.Height as u32;
-            let (pool_w, pool_h) = self.capture.pool_size();
-            if new_w > 0 && new_h > 0 && (new_w != pool_w || new_h != pool_h) {
-                self.pending_recreate = Some((new_w, new_h));
-            }
-        }
 
         // For window capture: crop to client area (remove title bar / borders)
         if let Some(client_box) = self.capture.get_client_box(src_width, src_height) {
@@ -467,7 +489,6 @@ impl CapturePipeline {
             format,
         };
         self.cached_frame = Some(output.clone());
-        self.apply_pending_recreate()?;
         Ok(output)
     }
 
@@ -491,7 +512,16 @@ impl CapturePipeline {
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-            let raw = self.read_raw_frame(&frame)?;
+            if let Some(raw) = self.resolve_frame_after_resize(frame, FRESH_FRAME_TIMEOUT)? {
+                return self.process_and_cache(raw);
+            }
+            if self.cached_frame.is_some() {
+                return self.build_cached_frame();
+            }
+            let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
+            let raw = self
+                .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT)?
+                .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
             return self.process_and_cache(raw);
         }
 
@@ -503,14 +533,22 @@ impl CapturePipeline {
 
         // Try to get a fresh frame with short timeout
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
-            let raw = self.read_raw_frame(&fresh)?;
-            return self.process_and_cache(raw);
+            if let Some(raw) = self.resolve_frame_after_resize(fresh, FRESH_FRAME_TIMEOUT)? {
+                return self.process_and_cache(raw);
+            }
+            if self.cached_frame.is_some() {
+                return self.build_cached_frame();
+            }
         }
 
         // Timeout — try fallback
         if let Some(fb) = fallback {
-            let raw = self.read_raw_frame(&fb)?;
-            return self.process_and_cache(raw);
+            if let Some(raw) = self.resolve_frame_after_resize(fb, FRESH_FRAME_TIMEOUT)? {
+                return self.process_and_cache(raw);
+            }
+            if self.cached_frame.is_some() {
+                return self.build_cached_frame();
+            }
         }
 
         // Use cached data
@@ -520,7 +558,9 @@ impl CapturePipeline {
 
         // No cache — full timeout
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-        let raw = self.read_raw_frame(&frame)?;
+        let raw = self
+            .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT)?
+            .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
         self.process_and_cache(raw)
     }
 
@@ -536,7 +576,16 @@ impl CapturePipeline {
         if self.first_call {
             self.first_call = false;
             let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-            let raw = self.read_raw_frame(&frame)?;
+            if let Some(raw) = self.resolve_frame_after_resize(frame, FRESH_FRAME_TIMEOUT)? {
+                return self.process_and_cache(raw);
+            }
+            if self.cached_frame.is_some() {
+                return self.build_cached_frame();
+            }
+            let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
+            let raw = self
+                .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT)?
+                .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
             return self.process_and_cache(raw);
         }
 
@@ -548,14 +597,22 @@ impl CapturePipeline {
 
         // Got a buffered frame — use it
         if let Some(f) = latest {
-            let raw = self.read_raw_frame(&f)?;
-            return self.process_and_cache(raw);
+            if let Some(raw) = self.resolve_frame_after_resize(f, FRESH_FRAME_TIMEOUT)? {
+                return self.process_and_cache(raw);
+            }
+            if self.cached_frame.is_some() {
+                return self.build_cached_frame();
+            }
         }
 
         // Pool empty — try short wait for new frame
         if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
-            let raw = self.read_raw_frame(&fresh)?;
-            return self.process_and_cache(raw);
+            if let Some(raw) = self.resolve_frame_after_resize(fresh, FRESH_FRAME_TIMEOUT)? {
+                return self.process_and_cache(raw);
+            }
+            if self.cached_frame.is_some() {
+                return self.build_cached_frame();
+            }
         }
 
         // Timeout — use cached data
@@ -565,7 +622,9 @@ impl CapturePipeline {
 
         // No cache — full timeout
         let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
-        let raw = self.read_raw_frame(&frame)?;
+        let raw = self
+            .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT)?
+            .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
         self.process_and_cache(raw)
     }
 
