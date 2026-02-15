@@ -107,7 +107,11 @@ fn test_consecutive_frames() {
 
         let line = format!(
             "Frame {}: {}x{}, {} bytes, {:.2}ms\n",
-            i, frame.width, frame.height, frame.data.len(), ms
+            i,
+            frame.width,
+            frame.height,
+            frame.data.len(),
+            ms
         );
         print!("{}", line);
         write!(report, "{}", line).unwrap();

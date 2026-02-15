@@ -26,7 +26,13 @@ enum SdrFormat {
 ///
 /// The target format is inferred from the file extension.
 /// Errors if the pixel format is not BGRA8.
-pub fn save(path: &Path, data: &[u8], width: u32, height: u32, format: ColorPixelFormat) -> Result<()> {
+pub fn save(
+    path: &Path,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    format: ColorPixelFormat,
+) -> Result<()> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -66,7 +72,11 @@ pub fn save(path: &Path, data: &[u8], width: u32, height: u32, format: ColorPixe
         }
         SdrFormat::Jpeg => {
             // JPEG doesn't support alpha; strip to RGB
-            let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|px| &px[..3]).copied().collect();
+            let rgb: Vec<u8> = rgba
+                .chunks_exact(4)
+                .flat_map(|px| &px[..3])
+                .copied()
+                .collect();
             image::write_buffer_with_format(
                 &mut writer,
                 &rgb,

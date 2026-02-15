@@ -33,12 +33,8 @@ fn main() {
     println!("SDR white level: {:.1} nits", sdr_white);
 
     // --- 1. Capture HDR frame (RGBA16F) ---
-    let capture = init_capture(
-        &d3d,
-        CaptureTarget::Monitor(hmonitor),
-        CapturePolicy::Hdr,
-    )
-    .expect("init capture");
+    let capture = init_capture(&d3d, CaptureTarget::Monitor(hmonitor), CapturePolicy::Hdr)
+        .expect("init capture");
     capture.start().expect("start");
 
     // Wait for first frame
@@ -85,7 +81,9 @@ fn main() {
         };
 
         let t_shader = Instant::now();
-        let output = pass.execute(&frame, sdr_white).expect(&format!("execute {}", name));
+        let output = pass
+            .execute(&frame, sdr_white)
+            .expect(&format!("execute {}", name));
         let shader_ms = t_shader.elapsed().as_secs_f64() * 1000.0;
 
         let t_read = Instant::now();

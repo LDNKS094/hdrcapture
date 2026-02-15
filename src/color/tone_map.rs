@@ -47,7 +47,11 @@ impl ToneMapPass {
     }
 
     /// Create a tone-map pass with a custom HLSL shader source.
-    pub fn with_shader(device: &ID3D11Device, context: &ID3D11DeviceContext, hlsl: &str) -> Result<Self> {
+    pub fn with_shader(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        hlsl: &str,
+    ) -> Result<Self> {
         let shader = ComputeShader::compile(device, hlsl, "main")?;
 
         // Create constant buffer (16 bytes, one float + padding)
