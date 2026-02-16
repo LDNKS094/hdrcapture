@@ -2,12 +2,16 @@
 //
 // Two PyClasses:
 // - CapturedFrame: frame container, holds pixel data, provides save() and numpy conversion
-// - Capture: reusable pipeline, wraps CapturePipeline
+// - Capture: reusable pipeline, delegates to a dedicated worker thread via channels
 //
-// Pipeline remains pure Rust, no dependency on pyo3/numpy.
-// This module handles cross-language bridging and error mapping.
+// Worker thread architecture:
+// - All D3D11/COM/WGC resources live on a single worker thread (thread-affine)
+// - Python-facing Capture holds only channel endpoints (Send + Sync)
+// - This eliminates the unsendable panic: Capture can be freely shared across Python threads,
+//   passed to atexit handlers, or dropped from any thread without triggering PyO3 assertions.
 
-use std::panic::AssertUnwindSafe;
+use std::sync::{mpsc, Mutex};
+use std::thread::{self, JoinHandle};
 
 use half::f16;
 use numpy::ndarray::Array3;
@@ -18,41 +22,122 @@ use pyo3::prelude::*;
 use crate::color::ColorPixelFormat;
 use crate::pipeline;
 
-/// Release the GIL, execute a pure-Rust closure, then re-acquire the GIL.
-///
-/// Bypasses pyo3's `Ungil` (Send) bound because `CapturePipeline` holds
-/// Win32 HANDLE and COM pointers that are not Send. This is safe because
-/// `Capture` is `#[pyclass(unsendable)]`, guaranteeing single-thread usage,
-/// and the closure executes synchronously — no non-Send types cross threads.
-///
-/// Panics inside the closure are caught via `catch_unwind` and converted to
-/// Python `RuntimeError`, ensuring the GIL is always restored regardless of
-/// whether the closure succeeds, fails, or panics.
-fn detach_gil<T>(py: Python<'_>, f: impl FnOnce() -> T) -> PyResult<T> {
-    // Keep `py` in scope so the borrow checker proves we hold the GIL token
-    // at both SaveThread and RestoreThread call sites.
-    let _py = py;
+// ---------------------------------------------------------------------------
+// Worker thread protocol
+// ---------------------------------------------------------------------------
 
-    // SAFETY: SaveThread releases the GIL on the current thread.
-    // RestoreThread re-acquires it on the same thread unconditionally,
-    // even if the closure panicked (catch_unwind guarantees we reach it).
-    let save = unsafe { pyo3::ffi::PyEval_SaveThread() };
-    let result = std::panic::catch_unwind(AssertUnwindSafe(f));
-    unsafe { pyo3::ffi::PyEval_RestoreThread(save) };
-
-    result.map_err(|panic| {
-        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-            format!("internal error: {}", s)
-        } else if let Some(s) = panic.downcast_ref::<String>() {
-            format!("internal error: {}", s)
-        } else {
-            "internal error: unknown panic".to_string()
-        };
-        PyRuntimeError::new_err(msg)
-    })
+enum Command {
+    Capture,
+    Grab,
+    IsHdr,
+    Close,
 }
 
-/// Parse a Python mode string into CapturePolicy.
+enum Response {
+    Frame(Result<pipeline::CapturedFrame, String>),
+    Bool(bool),
+    Closed,
+}
+
+type WorkerHandle = (
+    mpsc::Sender<Command>,
+    mpsc::Receiver<Response>,
+    JoinHandle<()>,
+);
+
+/// Spawn a worker thread that owns a CapturePipeline and processes commands.
+///
+/// The worker initializes COM (MTA) before creating the pipeline, ensuring
+/// D3D11/WinRT calls succeed on the dedicated thread.
+/// Returns (sender, receiver, join_handle) on success, or an error string if
+/// pipeline creation itself failed.
+fn spawn_worker(
+    init: Box<dyn FnOnce() -> anyhow::Result<pipeline::CapturePipeline> + Send>,
+) -> Result<WorkerHandle, String> {
+    // Channel for init result: worker sends back Ok(()) or Err(msg) once pipeline is ready.
+    let (init_tx, init_rx) = mpsc::channel::<Result<(), String>>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+    let (resp_tx, resp_rx) = mpsc::channel::<Response>();
+
+    let handle = thread::Builder::new()
+        .name("hdrcapture-worker".into())
+        .spawn(move || {
+            // SAFETY: CoInitializeEx initializes COM on this thread.
+            // MTA is required for D3D11 + WinRT interop (CreateDirect3D11DeviceFromDXGIDevice).
+            // We call CoUninitialize on thread exit via _com_guard drop.
+            let _com_guard = unsafe {
+                use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+                if let Err(e) = CoInitializeEx(None, COINIT_MULTITHREADED).ok() {
+                    let _ = init_tx.send(Err(format!("COM init failed: {e}")));
+                    return;
+                }
+                ComGuard
+            };
+
+            let mut pipeline = match init() {
+                Ok(p) => {
+                    let _ = init_tx.send(Ok(()));
+                    p
+                }
+                Err(e) => {
+                    let _ = init_tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+
+            // Event loop: process commands until Close or channel disconnect.
+            while let Ok(cmd) = cmd_rx.recv() {
+                let resp = match cmd {
+                    Command::Capture => {
+                        Response::Frame(pipeline.capture().map_err(|e| e.to_string()))
+                    }
+                    Command::Grab => Response::Frame(pipeline.grab().map_err(|e| e.to_string())),
+                    Command::IsHdr => Response::Bool(pipeline.is_hdr()),
+                    Command::Close => {
+                        drop(pipeline);
+                        let _ = resp_tx.send(Response::Closed);
+                        return;
+                    }
+                };
+                if resp_tx.send(resp).is_err() {
+                    // Python side dropped the receiver; shut down.
+                    return;
+                }
+            }
+            // cmd_tx dropped (Capture dropped without close) — just exit, pipeline drops here.
+        })
+        .map_err(|e| format!("Failed to spawn worker thread: {e}"))?;
+
+    // Wait for pipeline init result.
+    match init_rx.recv() {
+        Ok(Ok(())) => Ok((cmd_tx, resp_rx, handle)),
+        Ok(Err(msg)) => {
+            let _ = handle.join();
+            Err(msg)
+        }
+        Err(_) => {
+            let _ = handle.join();
+            Err("Worker thread exited before initialization".into())
+        }
+    }
+}
+
+/// RAII guard for COM uninitialization.
+struct ComGuard;
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        // SAFETY: Paired with CoInitializeEx at thread start.
+        unsafe {
+            windows::Win32::System::Com::CoUninitialize();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: parse mode, warn mismatch
+// ---------------------------------------------------------------------------
+
 fn parse_mode(mode: &str) -> PyResult<pipeline::CapturePolicy> {
     pipeline::CapturePolicy::from_mode(mode).ok_or_else(|| {
         PyRuntimeError::new_err(format!(
@@ -62,8 +147,6 @@ fn parse_mode(mode: &str) -> PyResult<pipeline::CapturePolicy> {
     })
 }
 
-/// Emit a Python `UserWarning` when the requested mode doesn't match the monitor's HDR state.
-/// Does nothing for `auto` mode (it adapts automatically).
 fn warn_mode_mismatch(
     py: Python<'_>,
     policy: pipeline::CapturePolicy,
@@ -89,7 +172,7 @@ fn warn_mode_mismatch(
 }
 
 // ---------------------------------------------------------------------------
-// CapturedFrame — frame container
+// CapturedFrame — frame container (unchanged)
 // ---------------------------------------------------------------------------
 
 /// Single frame capture result
@@ -141,7 +224,8 @@ impl CapturedFrame {
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = &self.inner;
         let path = path.to_string();
-        detach_gil(py, || inner.save(&path))?.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        py.detach(|| inner.save(&path))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Convert to numpy array.
@@ -218,7 +302,7 @@ impl CapturedFrame {
 }
 
 // ---------------------------------------------------------------------------
-// Capture — reusable pipeline
+// Capture — worker-thread-based pipeline
 // ---------------------------------------------------------------------------
 
 /// Screen/window capture pipeline
@@ -230,17 +314,70 @@ impl CapturedFrame {
 /// Supports context manager:
 ///   with capture.monitor(0) as cap:
 ///       frame = cap.capture()
-#[pyclass(unsendable, name = "capture")]
+///
+/// Thread-safe: can be shared across Python threads, passed to atexit handlers,
+/// or dropped from any thread without panic.
+#[pyclass(name = "capture")]
 struct Capture {
-    pipeline: Option<pipeline::CapturePipeline>,
+    cmd_tx: Option<mpsc::Sender<Command>>,
+    resp_rx: Option<Mutex<mpsc::Receiver<Response>>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl Capture {
-    /// Get pipeline reference, errors after close()
-    fn get_pipeline(&mut self) -> PyResult<&mut pipeline::CapturePipeline> {
-        self.pipeline
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))
+    /// Send a command and unwrap the response, erroring if already closed.
+    ///
+    /// Releases the GIL before acquiring the Mutex to prevent deadlock:
+    /// without this, thread A (holds Mutex, waits for GIL) and thread B
+    /// (holds GIL, waits for Mutex) would deadlock.
+    fn call(&self, py: Python<'_>, cmd: Command) -> PyResult<Response> {
+        let tx = self
+            .cmd_tx
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))?;
+        let rx_mutex = self
+            .resp_rx
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))?;
+
+        // Release GIL before acquiring Mutex — consistent lock ordering prevents deadlock.
+        let (send_ok, recv_result) = py.detach(|| {
+            let rx = rx_mutex.lock();
+            match rx {
+                Ok(rx) => match tx.send(cmd) {
+                    Ok(()) => (true, rx.recv().ok()),
+                    Err(_) => (false, None),
+                },
+                Err(_) => (false, None),
+            }
+        });
+
+        if !send_ok {
+            return Err(PyRuntimeError::new_err("Capture is closed"));
+        }
+        recv_result.ok_or_else(|| PyRuntimeError::new_err("Worker thread exited unexpectedly"))
+    }
+
+    /// Shut down the worker thread, optionally waiting for it to finish.
+    fn shutdown(&mut self, join: bool) {
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(Command::Close);
+        }
+        // Drop receiver so worker can detect disconnect if Close wasn't processed.
+        self.resp_rx.take();
+        if join {
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        // Don't join — Drop may run under GIL (e.g. GC, atexit) and join could
+        // block if WGC session teardown is slow. Worker exits on its own.
+        self.shutdown(false);
     }
 }
 
@@ -255,12 +392,22 @@ impl Capture {
     #[pyo3(signature = (index=0, mode="auto"))]
     fn monitor(py: Python<'_>, index: usize, mode: &str) -> PyResult<Self> {
         let policy = parse_mode(mode)?;
-        let pipeline = pipeline::CapturePipeline::monitor(index, policy)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
-        Ok(Self {
-            pipeline: Some(pipeline),
-        })
+
+        let (cmd_tx, resp_rx, handle) = spawn_worker(Box::new(move || {
+            pipeline::CapturePipeline::monitor(index, policy)
+        }))
+        .map_err(PyRuntimeError::new_err)?;
+
+        // Query is_hdr for mode mismatch warning.
+        let cap = Capture {
+            cmd_tx: Some(cmd_tx),
+            resp_rx: Some(Mutex::new(resp_rx)),
+            handle: Some(handle),
+        };
+        if let Ok(Response::Bool(is_hdr)) = cap.call(py, Command::IsHdr) {
+            warn_mode_mismatch(py, policy, is_hdr)?;
+        }
+        Ok(cap)
     }
 
     /// Create window capture pipeline by process name
@@ -280,49 +427,69 @@ impl Capture {
         headless: bool,
     ) -> PyResult<Self> {
         let policy = parse_mode(mode)?;
-        let pipeline = pipeline::CapturePipeline::window(process_name, index, policy, headless)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        warn_mode_mismatch(py, policy, pipeline.is_hdr())?;
-        Ok(Self {
-            pipeline: Some(pipeline),
-        })
+        let name = process_name.to_string();
+
+        let (cmd_tx, resp_rx, handle) = spawn_worker(Box::new(move || {
+            pipeline::CapturePipeline::window(&name, index, policy, headless)
+        }))
+        .map_err(PyRuntimeError::new_err)?;
+
+        let cap = Capture {
+            cmd_tx: Some(cmd_tx),
+            resp_rx: Some(Mutex::new(resp_rx)),
+            handle: Some(handle),
+        };
+        if let Ok(Response::Bool(is_hdr)) = cap.call(py, Command::IsHdr) {
+            warn_mode_mismatch(py, policy, is_hdr)?;
+        }
+        Ok(cap)
     }
 
     /// Whether the target monitor has HDR enabled.
     #[getter]
-    fn is_hdr(&self) -> PyResult<bool> {
-        let p = self
-            .pipeline
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("Capture is closed"))?;
-        Ok(p.is_hdr())
+    fn is_hdr(&self, py: Python<'_>) -> PyResult<bool> {
+        match self.call(py, Command::IsHdr)? {
+            Response::Bool(v) => Ok(v),
+            _ => Err(PyRuntimeError::new_err("Unexpected worker response")),
+        }
     }
 
     /// Screenshot mode: capture a fresh frame
     ///
     /// Drain backlog and wait for DWM to push new frame, guarantees returned frame is generated after the call.
     /// Releases GIL during wait and readback, doesn't block other Python threads.
-    fn capture(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
-        let p = self.get_pipeline()?;
-        let frame =
-            detach_gil(py, || p.capture())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(CapturedFrame { inner: frame })
+    fn capture(&self, py: Python<'_>) -> PyResult<CapturedFrame> {
+        match self.call(py, Command::Capture)? {
+            Response::Frame(Ok(frame)) => Ok(CapturedFrame { inner: frame }),
+            Response::Frame(Err(e)) => Err(PyRuntimeError::new_err(e)),
+            _ => Err(PyRuntimeError::new_err("Unexpected worker response")),
+        }
     }
 
     /// Continuous capture mode: grab latest available frame
     ///
     /// Drain backlog and keep last frame, wait for new frame when pool is empty. Lower latency.
     /// Releases GIL during wait and readback, doesn't block other Python threads.
-    fn grab(&mut self, py: Python<'_>) -> PyResult<CapturedFrame> {
-        let p = self.get_pipeline()?;
-        let frame =
-            detach_gil(py, || p.grab())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(CapturedFrame { inner: frame })
+    fn grab(&self, py: Python<'_>) -> PyResult<CapturedFrame> {
+        match self.call(py, Command::Grab)? {
+            Response::Frame(Ok(frame)) => Ok(CapturedFrame { inner: frame }),
+            Response::Frame(Err(e)) => Err(PyRuntimeError::new_err(e)),
+            _ => Err(PyRuntimeError::new_err("Unexpected worker response")),
+        }
     }
 
     /// Release capture resources
-    fn close(&mut self) {
-        self.pipeline = None;
+    fn close(&mut self, py: Python<'_>) {
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(Command::Close);
+        }
+        self.resp_rx.take();
+        if let Some(h) = self.handle.take() {
+            // Release GIL while waiting for worker teardown (WGC session stop may be slow).
+            py.detach(|| {
+                let _ = h.join();
+            });
+        }
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -331,16 +498,17 @@ impl Capture {
 
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Option<Bound<'_, PyAny>>,
         _exc_val: Option<Bound<'_, PyAny>>,
         _exc_tb: Option<Bound<'_, PyAny>>,
     ) -> bool {
-        self.close();
+        self.close(py);
         false // Don't swallow exceptions
     }
 
     fn __repr__(&self) -> String {
-        if self.pipeline.is_some() {
+        if self.cmd_tx.is_some() {
             "Capture(active)".to_string()
         } else {
             "Capture(closed)".to_string()
@@ -377,23 +545,54 @@ fn screenshot(
     headless: bool,
 ) -> PyResult<CapturedFrame> {
     let policy = parse_mode(mode)?;
+    let window_name = window.map(|s| s.to_string());
 
-    // Create pipeline (releases GIL during D3D11/WGC init)
-    let mut pipe = detach_gil(py, || match window {
-        Some(process_name) => {
-            pipeline::CapturePipeline::window(process_name, window_index, policy, headless)
-        }
+    // Spawn worker, create pipeline, capture one frame, shut down.
+    let (cmd_tx, resp_rx, handle) = spawn_worker(Box::new(move || match window_name {
+        Some(name) => pipeline::CapturePipeline::window(&name, window_index, policy, headless),
         None => pipeline::CapturePipeline::monitor(monitor, policy),
-    })?
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    }))
+    .map_err(PyRuntimeError::new_err)?;
 
-    // Warn on mode/HDR mismatch (needs GIL for Python warnings)
-    warn_mode_mismatch(py, policy, pipe.is_hdr())?;
+    // Note: manual GIL release here because mpsc::Receiver is !Sync,
+    // so &Receiver doesn't satisfy the Ungil bound required by allow_threads().
+    // The operations inside (channel send/recv) never panic, so GIL is always restored.
+    cmd_tx
+        .send(Command::IsHdr)
+        .map_err(|_| PyRuntimeError::new_err("Worker thread is gone"))?;
+    // Release GIL while waiting for is_hdr response.
+    let is_hdr_resp = unsafe {
+        let save = pyo3::ffi::PyEval_SaveThread();
+        let r = resp_rx.recv();
+        pyo3::ffi::PyEval_RestoreThread(save);
+        r
+    };
+    if let Ok(Response::Bool(is_hdr)) = is_hdr_resp {
+        warn_mode_mismatch(py, policy, is_hdr)?;
+    }
 
-    // Capture frame (releases GIL during wait + readback)
-    let frame =
-        detach_gil(py, || pipe.capture())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    Ok(CapturedFrame { inner: frame })
+    // Capture frame (releases GIL during wait + readback).
+    cmd_tx
+        .send(Command::Capture)
+        .map_err(|_| PyRuntimeError::new_err("Worker thread is gone"))?;
+    let capture_resp = unsafe {
+        let save = pyo3::ffi::PyEval_SaveThread();
+        let r = resp_rx.recv();
+        pyo3::ffi::PyEval_RestoreThread(save);
+        r
+    };
+
+    // Shut down worker.
+    let _ = cmd_tx.send(Command::Close);
+    drop(cmd_tx);
+    drop(resp_rx);
+    let _ = handle.join();
+
+    match capture_resp {
+        Ok(Response::Frame(Ok(frame))) => Ok(CapturedFrame { inner: frame }),
+        Ok(Response::Frame(Err(e))) => Err(PyRuntimeError::new_err(e)),
+        _ => Err(PyRuntimeError::new_err("Unexpected worker response")),
+    }
 }
 
 /// HDR-aware screen capture library for Windows
