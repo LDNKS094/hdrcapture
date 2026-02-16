@@ -5,8 +5,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use super::frame::CapturedFrame;
+use super::helpers::{parse_mode, warn_mode_mismatch};
 use super::worker::{spawn_worker, Command, Response};
-use super::{parse_mode, warn_mode_mismatch};
 use crate::pipeline;
 
 /// Screen/window capture pipeline
