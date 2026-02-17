@@ -6,7 +6,6 @@
 // Frame lifetime covers CopyResource, ensuring DWM won't overwrite the surface being read.
 
 use std::marker::PhantomData;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,6 +27,12 @@ use crate::d3d11::texture::TextureReader;
 use crate::d3d11::{create_d3d11_device, D3D11Context};
 use crate::memory::ElasticBufferPool;
 
+mod types;
+mod build;
+
+pub use types::{CapturedFrame, SharedFrameData};
+use types::{CropCache, RawFrame};
+
 /// First frame wait timeout
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -37,80 +42,6 @@ const FRESH_FRAME_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Maximum retries when resize keeps changing during transition.
 const RESIZE_RETRY_LIMIT: usize = 3;
-
-/// Single frame capture result
-#[derive(Clone)]
-pub struct CapturedFrame {
-    /// Pixel data (shared, read-only), length = width * height * bytes_per_pixel
-    pub data: Arc<SharedFrameData>,
-    /// Frame width (pixels)
-    pub width: u32,
-    /// Frame height (pixels)
-    pub height: u32,
-    /// Frame timestamp (seconds), relative to system boot time (QPC)
-    pub timestamp: f64,
-    /// Pixel format of `data`
-    pub format: ColorPixelFormat,
-}
-
-impl CapturedFrame {
-    pub fn bytes_per_pixel(&self) -> usize {
-        match self.format {
-            ColorPixelFormat::Bgra8 => 4,
-            ColorPixelFormat::Rgba16f => 8,
-        }
-    }
-
-    /// Save frame to file.
-    ///
-    /// Format is determined by file extension:
-    /// - `.png` `.bmp` `.jpg` `.tiff` — standard formats (BGRA8 only)
-    /// - `.jxr` — JPEG XR (both BGRA8 and RGBA16F)
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        crate::image::save(
-            path.as_ref(),
-            self.data.as_slice(),
-            self.width,
-            self.height,
-            self.format,
-        )
-    }
-}
-
-pub struct SharedFrameData {
-    bytes: Vec<u8>,
-    pool: Arc<ElasticBufferPool>,
-    group_idx: usize,
-}
-
-impl SharedFrameData {
-    pub fn as_slice(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-}
-
-impl std::ops::Deref for SharedFrameData {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.bytes
-    }
-}
-
-impl Drop for SharedFrameData {
-    fn drop(&mut self) {
-        let bytes = std::mem::take(&mut self.bytes);
-        self.pool.release_recycled(self.group_idx, bytes);
-    }
-}
 
 /// Capture pipeline
 ///
@@ -154,131 +85,7 @@ pub struct CapturePipeline {
     _not_send_sync: PhantomData<*const ()>,
 }
 
-struct CropCache {
-    texture: ID3D11Texture2D,
-    width: u32,
-    height: u32,
-    format: DXGI_FORMAT,
-}
-
-struct RawFrame {
-    texture: ID3D11Texture2D,
-    width: u32,
-    height: u32,
-    timestamp: f64,
-    format: ColorPixelFormat,
-}
-
 impl CapturePipeline {
-    fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
-        let bpp = match format {
-            ColorPixelFormat::Bgra8 => 4,
-            ColorPixelFormat::Rgba16f => 8,
-        };
-        width as usize * height as usize * bpp
-    }
-
-    fn color_format(format: DXGI_FORMAT) -> Result<ColorPixelFormat> {
-        match format {
-            DXGI_FORMAT_B8G8R8A8_UNORM => Ok(ColorPixelFormat::Bgra8),
-            DXGI_FORMAT_R16G16B16A16_FLOAT => Ok(ColorPixelFormat::Rgba16f),
-            _ => bail!("Unsupported DXGI_FORMAT for color pipeline: {:?}", format),
-        }
-    }
-
-    /// Create capture pipeline by monitor index
-    ///
-    /// Indices are ordered by system enumeration, not guaranteed that `0` is the primary monitor.
-    pub fn monitor(index: usize, policy: CapturePolicy) -> Result<Self> {
-        enable_dpi_awareness();
-        let hmonitor = find_monitor(index)?;
-        let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
-        Self::new(
-            CaptureTarget::Monitor(hmonitor),
-            policy,
-            sdr_white_nits,
-            false,
-        )
-    }
-
-    /// Create window capture pipeline by process name
-    ///
-    /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
-    /// `headless` controls whether to crop the title bar and borders (default: true).
-    pub fn window(
-        process_name: &str,
-        index: Option<usize>,
-        policy: CapturePolicy,
-        headless: bool,
-    ) -> Result<Self> {
-        enable_dpi_awareness();
-        let hwnd = find_window(process_name, index)?;
-        let hmonitor = unsafe {
-            windows::Win32::Graphics::Gdi::MonitorFromWindow(
-                hwnd,
-                windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
-            )
-        };
-        let sdr_white_nits = white_level::query_sdr_white_level(hmonitor);
-        Self::new(
-            CaptureTarget::Window(hwnd),
-            policy,
-            sdr_white_nits,
-            headless,
-        )
-    }
-
-    fn new(
-        target: CaptureTarget,
-        policy: CapturePolicy,
-        sdr_white_nits: f32,
-        headless: bool,
-    ) -> Result<Self> {
-        let d3d_ctx = create_d3d11_device()?;
-        let capture = init_capture(&d3d_ctx, target, policy)?;
-        let target_hdr = capture.is_hdr();
-        capture.start()?;
-        // Create reader after start() to let DWM start preparing first frame as early as possible
-        let mut reader = TextureReader::new(d3d_ctx.device.clone(), d3d_ctx.context.clone());
-
-        // Pre-create Staging Texture to avoid ~11ms creation overhead on first frame readback.
-        // Hdr mode outputs R16G16B16A16_FLOAT (8 bpp); Auto/Sdr output BGRA8 (4 bpp).
-        let (w, h) = capture.pool_size();
-        let (staging_format, bpp) = if policy == CapturePolicy::Hdr {
-            (DXGI_FORMAT_R16G16B16A16_FLOAT, 8)
-        } else {
-            (DXGI_FORMAT_B8G8R8A8_UNORM, 4)
-        };
-        reader.ensure_staging_texture(w, h, staging_format)?;
-        let output_frame_bytes = w as usize * h as usize * bpp;
-        let output_pool = ElasticBufferPool::new(output_frame_bytes);
-
-        // Create tone-map pass only for Auto (may need HDR→SDR conversion)
-        let tone_map_pass = if policy == CapturePolicy::Auto {
-            Some(ToneMapPass::new(&d3d_ctx.device, &d3d_ctx.context)?)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            _d3d_ctx: d3d_ctx,
-            policy,
-            capture,
-            reader,
-            output_pool,
-            output_frame_bytes,
-            first_call: true,
-            cached_frame: None,
-            tone_map_pass,
-            sdr_white_nits,
-            target_hdr,
-            headless,
-            crop_texture: None,
-            force_fresh: false,
-            _not_send_sync: PhantomData,
-        })
-    }
-
     /// Check if frame pool needs recreation due to size change.
     ///
     /// For window targets, uses pre-queried geometry when available to avoid
