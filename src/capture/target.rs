@@ -12,7 +12,8 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
 };
 
 // ---------------------------------------------------------------------------
@@ -91,47 +92,78 @@ unsafe extern "system" fn enum_monitor_proc(
 // Window lookup
 // ---------------------------------------------------------------------------
 
-/// Find window by process name
+/// Unified selector input for window resolution.
+pub enum WindowSelector {
+    Hwnd(HWND),
+    Pid(u32),
+    Process(String),
+}
+
+/// Find window by unified selector + optional ranked index.
 ///
-/// Enumerates all visible top-level windows belonging to the specified process, selecting by `index`.
-/// `index` defaults to 0 (first matching window).
+/// Routing:
+/// - `Hwnd`: validate and return directly.
+/// - `Pid`/`Process`: enumerate candidate windows, rank heuristically, then pick by index.
 ///
 /// # Examples
 /// ```no_run
-/// # use hdrcapture::capture::find_window;
-/// let hwnd = find_window("notepad.exe", None).unwrap();       // first notepad window
-/// let hwnd = find_window("notepad.exe", Some(1)).unwrap();    // second
+/// # use hdrcapture::capture::{find_window, WindowSelector};
+/// let hwnd = find_window(WindowSelector::Process("notepad.exe".to_string()), None).unwrap();
+/// let hwnd = find_window(WindowSelector::Process("notepad.exe".to_string()), Some(1)).unwrap();
 /// ```
-pub fn find_window(process_name: &str, index: Option<usize>) -> Result<HWND> {
-    let index = index.unwrap_or(0);
-
-    // Phase 1: Collect target PIDs via process snapshot
-    let pids = get_pids_by_name(process_name)?;
-    if pids.is_empty() {
-        bail!("No running process found for \"{}\"", process_name);
+pub fn find_window(selector: WindowSelector, index: Option<usize>) -> Result<HWND> {
+    match selector {
+        WindowSelector::Hwnd(hwnd) => validate_window(hwnd),
+        WindowSelector::Pid(pid) => {
+            let mut pids = HashSet::new();
+            pids.insert(pid);
+            pick_ranked_window(&pids, index).with_context(|| {
+                let idx = index.unwrap_or(0);
+                format!("Window index {} out of range for pid {}", idx, pid)
+            })
+        }
+        WindowSelector::Process(process) => {
+            let pids = get_pids(&process)?;
+            if pids.is_empty() {
+                bail!("No running process found for \"{}\"", process);
+            }
+            pick_ranked_window(&pids, index).with_context(|| {
+                let idx = index.unwrap_or(0);
+                format!(
+                    "Window index {} out of range for process \"{}\"",
+                    idx, process
+                )
+            })
+        }
     }
+}
 
-    // Phase 2: Enumerate windows, filter quickly using PID set
-    let windows = enumerate_windows_by_pids(&pids);
+/// Validate and normalize an HWND.
+pub fn validate_window(hwnd: HWND) -> Result<HWND> {
+    let ok = unsafe { IsWindow(Some(hwnd)).as_bool() };
+    if !ok {
+        bail!("Invalid window handle: {:?}", hwnd.0);
+    }
+    Ok(hwnd)
+}
+
+fn pick_ranked_window(pids: &HashSet<u32>, index: Option<usize>) -> Result<HWND> {
+    let windows = enumerate_windows(pids)?;
     if windows.is_empty() {
-        bail!("No visible windows found for process \"{}\"", process_name);
+        bail!("No candidate windows found");
     }
-
-    windows.get(index).copied().with_context(|| {
-        format!(
-            "Window index {} out of range for \"{}\" (found {})",
-            index,
-            process_name,
-            windows.len()
-        )
-    })
+    pick_window(&windows, index)
 }
 
 // --- Phase 1: PID collection ---
 
-/// Get all PIDs matching the process name via process snapshot
-fn get_pids_by_name(process_name: &str) -> Result<HashSet<u32>> {
-    let target = process_name.to_lowercase();
+/// Collect all PIDs whose executable name matches `process`.
+///
+/// Data source: Toolhelp process snapshot
+/// (`CreateToolhelp32Snapshot` + `Process32FirstW/Process32NextW`).
+/// Matching is case-insensitive exact match on executable file name.
+fn get_pids(process: &str) -> Result<HashSet<u32>> {
+    let target = process.to_lowercase();
     let mut pids = HashSet::new();
 
     unsafe {
@@ -178,22 +210,39 @@ fn get_pids_by_name(process_name: &str) -> Result<HashSet<u32>> {
 
 // --- Phase 2: Window matching ---
 
-fn enumerate_windows_by_pids(pids: &HashSet<u32>) -> Vec<HWND> {
+/// Enumerate top-level windows owned by `pids`, then rank by heuristic score.
+///
+/// This function does not hard-filter candidates by visibility/tool/minimized state.
+/// Those signals only affect ranking priority. Returned list is sorted descending
+/// by score and ready for index-based selection.
+fn enumerate_windows(pids: &HashSet<u32>) -> Result<Vec<HWND>> {
     unsafe {
         let mut ctx = EnumCtx {
             pids,
-            results: Vec::new(),
+            candidates: Vec::new(),
         };
 
-        let _ = EnumWindows(Some(enum_window_proc), LPARAM(&mut ctx as *mut _ as isize));
+        let ok = EnumWindows(Some(enum_window_proc), LPARAM(&mut ctx as *mut _ as isize));
+        if ok.is_err() {
+            bail!("EnumWindows failed");
+        }
 
-        ctx.results
+        let mut ranked = ctx.candidates;
+        ranked.sort_by(compare_candidate);
+        Ok(ranked.into_iter().map(|c| c.hwnd).collect())
     }
 }
 
 struct EnumCtx<'a> {
     pids: &'a HashSet<u32>,
-    results: Vec<HWND>,
+    candidates: Vec<WindowCandidate>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowCandidate {
+    hwnd: HWND,
+    score: i64,
+    area: i64,
 }
 
 unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -201,18 +250,71 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // Same lifetime and single-thread guarantees as enum_monitor_proc.
     let ctx = &mut *(lparam.0 as *mut EnumCtx);
 
-    if !IsWindowVisible(hwnd).as_bool() {
-        return BOOL(1);
-    }
-
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
     if pid != 0 && ctx.pids.contains(&pid) {
-        ctx.results.push(hwnd);
+        let visible = IsWindowVisible(hwnd).as_bool();
+        let minimized = IsIconic(hwnd).as_bool();
+        let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let tool = (exstyle & WS_EX_TOOLWINDOW.0) != 0;
+
+        let mut rect = RECT::default();
+        let area = if GetWindowRect(hwnd, &mut rect).is_ok() {
+            let w = (rect.right - rect.left).max(0) as i64;
+            let h = (rect.bottom - rect.top).max(0) as i64;
+            w * h
+        } else {
+            0
+        };
+
+        let mut score = 0i64;
+        if visible {
+            score += 10_000;
+        }
+        if !tool {
+            score += 3_000;
+        }
+        if !minimized {
+            score += 1_000;
+        }
+        score += (area / 10_000).min(5_000);
+
+        ctx.candidates.push(WindowCandidate { hwnd, score, area });
     }
 
     BOOL(1)
+}
+
+/// Compare two candidates for stable priority ordering.
+///
+/// Order keys:
+/// 1) score (desc)
+/// 2) area (desc)
+/// 3) hwnd value (asc, deterministic tie-break)
+fn compare_candidate(a: &WindowCandidate, b: &WindowCandidate) -> std::cmp::Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| b.area.cmp(&a.area))
+        .then_with(|| a.hwnd.0.cmp(&b.hwnd.0))
+}
+
+/// Pick one window from a ranked candidate list.
+///
+/// `index = None` selects the first (highest-ranked) window.
+/// `index = Some(n)` selects the n-th item in the ranked list.
+fn pick_window(windows: &[HWND], index: Option<usize>) -> Result<HWND> {
+    if windows.is_empty() {
+        bail!("No candidate windows found");
+    }
+    let idx = index.unwrap_or(0);
+    windows.get(idx).copied().with_context(|| {
+        format!(
+            "Window index {} out of range (found {})",
+            idx,
+            windows.len()
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -238,14 +340,20 @@ mod tests {
 
     #[test]
     fn test_find_window_not_found() {
-        let result = find_window("nonexistent_process_12345.exe", None);
+        let result = find_window(
+            WindowSelector::Process("nonexistent_process_12345.exe".to_string()),
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_find_window_index_out_of_range() {
         // explorer.exe usually exists, but won't have 999 windows
-        let result = find_window("explorer.exe", Some(999));
+        let result = find_window(
+            WindowSelector::Process("explorer.exe".to_string()),
+            Some(999),
+        );
         assert!(result.is_err());
     }
 }

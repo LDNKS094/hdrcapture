@@ -1,4 +1,5 @@
 use super::*;
+use crate::capture::WindowSelector;
 
 impl CapturePipeline {
     pub(super) fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
@@ -37,13 +38,13 @@ impl CapturePipeline {
     /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
     /// `headless` controls whether to crop the title bar and borders (default: true).
     pub fn window(
-        process_name: &str,
+        process: &str,
         index: Option<usize>,
         policy: CapturePolicy,
         headless: bool,
     ) -> Result<Self> {
         enable_dpi_awareness();
-        let hwnd = find_window(process_name, index)?;
+        let hwnd = find_window(WindowSelector::Process(process.to_string()), index)?;
         let hmonitor = unsafe {
             windows::Win32::Graphics::Gdi::MonitorFromWindow(
                 hwnd,

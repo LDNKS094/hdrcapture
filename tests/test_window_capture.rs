@@ -3,7 +3,7 @@
 // Modify TARGET_PROCESS to specify the process to capture.
 // If target window doesn't exist, test will gracefully skip.
 
-use hdrcapture::capture::find_window;
+use hdrcapture::capture::{find_window, WindowSelector};
 use hdrcapture::pipeline::{CapturePipeline, CapturePolicy};
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,12 @@ const TARGET_INDEX: usize = 0;
 
 #[test]
 fn test_capture_target_window() {
-    if find_window(TARGET_PROCESS, Some(TARGET_INDEX)).is_err() {
+    if find_window(
+        WindowSelector::Process(TARGET_PROCESS.to_string()),
+        Some(TARGET_INDEX),
+    )
+    .is_err()
+    {
         println!(
             "SKIPPED: no window found for \"{}\" index {}",
             TARGET_PROCESS, TARGET_INDEX
