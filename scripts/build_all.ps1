@@ -1,4 +1,4 @@
-# build_all.ps1 — Release build + wheel build for each discovered venv + Rust tests.
+# build_all.ps1 — Release build + Python tests + wheel build for each discovered venv + Rust tests.
 #
 # Usage:
 #   .\scripts\build_all.ps1            # full pipeline
@@ -87,14 +87,14 @@ if (-not $SkipRust) {
 }
 
 # ------------------------------------------------------------------
-# 2. maturin build: one wheel per discovered venv
+# 2. Python tests + maturin build: run pytest and build one wheel per venv
 # ------------------------------------------------------------------
 foreach ($pyExe in $VenvPythonExes) {
     $venvDir = Split-Path -Parent (Split-Path -Parent $pyExe)
     $tag = Split-Path -Leaf $venvDir
     $venvScripts = Join-Path $venvDir "Scripts"
 
-    Write-Step "maturin build ($tag)"
+    Write-Step "python tests ($tag)"
 
     $pyVer = & $pyExe --version 2>&1
     Write-Host "  $pyVer"
@@ -105,6 +105,24 @@ foreach ($pyExe in $VenvPythonExes) {
         # Activate target venv context for uv --active.
         $env:VIRTUAL_ENV = $venvDir
         $env:PATH = "$venvScripts;$oldPath"
+
+        # Install the extension into this venv before pytest.
+        & uv run --active maturin develop
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "maturin develop ($tag)"
+            $Failed += "$tag maturin develop"
+            continue
+        }
+
+        & uv run --active pytest
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "pytest ($tag)"
+            $Failed += "$tag pytest"
+            continue
+        }
+        Write-Ok "pytest ($tag)"
+
+        Write-Step "maturin build ($tag)"
         & uv run --active maturin build --release -i $pyExe
     }
     finally {
