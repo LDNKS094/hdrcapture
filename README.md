@@ -73,11 +73,15 @@ Window capture:
 ```python
 import hdrcapture
 
-frame = hdrcapture.screenshot(window="notepad.exe")
+frame = hdrcapture.screenshot(window="notepad.exe", index=0)
 frame.save("notepad.png")
 
-with hdrcapture.capture.window("notepad.exe") as cap:
+with hdrcapture.capture.window(process="notepad.exe") as cap:
     frame = cap.capture()
+
+# Alternative selectors
+# with hdrcapture.capture.window(pid=1234) as cap:
+# with hdrcapture.capture.window(hwnd=0x00123456) as cap:
 ```
 
 ## Capture Modes
@@ -116,9 +120,11 @@ frame = hdrcapture.screenshot(mode="sdr")
 
 ## API Reference
 
-### `screenshot(monitor=0, window=None, index=None, mode="auto") -> CapturedFrame`
+### `screenshot(monitor=0, window=None, pid=None, hwnd=None, index=None, mode="auto", headless=True) -> CapturedFrame`
 
 One-shot capture. Creates and destroys a pipeline internally (~70ms cold start). Use `capture` class for repeated captures.
+
+When `window`, `pid`, or `hwnd` is provided, window capture is used. Selector priority is `hwnd > pid > window`.
 
 ### `CapturedFrame`
 
@@ -142,13 +148,16 @@ If the display environment changes (HDR toggled, monitor plugged/unplugged), dis
 | Method                                                    | Description                                           |
 | --------------------------------------------------------- | ----------------------------------------------------- |
 | `capture.monitor(index=0, mode="auto")`                 | Create pipeline for a monitor                         |
-| `capture.window(process_name, index=None, mode="auto")` | Create pipeline for a window                          |
+| `capture.window(process=None, *, pid=None, hwnd=None, index=None, mode="auto", headless=True)` | Create pipeline for a window                          |
 | `.is_hdr`                                               | Whether the target monitor has HDR enabled            |
 | `.capture()`                                            | Screenshot mode — waits for a fresh frame (~1 VSync) |
 | `.grab()`                                               | Streaming mode — returns the latest available frame  |
 | `.close()`                                              | Release capture resources                             |
 
 Supports context manager (`with` statement).
+
+For window capture, at least one of `process`, `pid`, or `hwnd` is required.
+If multiple selectors are provided, lower-priority selectors are ignored (`hwnd > pid > process`).
 
 ## Performance
 
