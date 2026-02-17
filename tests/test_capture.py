@@ -87,6 +87,31 @@ def test_error_handling_invalid_targets() -> None:
     with pytest.raises(RuntimeError):
         hdrcapture.capture.window("__nonexistent_process_12345__.exe")
 
+    with pytest.raises(RuntimeError):
+        hdrcapture.capture.window()
+
+    with pytest.raises(RuntimeError):
+        hdrcapture.capture.window(pid=999_999_999)
+
+    with pytest.raises(RuntimeError):
+        hdrcapture.capture.window(hwnd=0)
+
+
+def test_window_selector_priority_warnings() -> None:
+    with pytest.warns(UserWarning):
+        with pytest.raises(RuntimeError):
+            hdrcapture.capture.window(
+                "__nonexistent_process_12345__.exe", pid=999_999_999
+            )
+
+    with pytest.warns(UserWarning):
+        with pytest.raises(RuntimeError):
+            hdrcapture.capture.window(
+                "__nonexistent_process_12345__.exe",
+                pid=999_999_999,
+                hwnd=0,
+            )
+
 
 def test_capture_modes_and_invalid_mode(tmp_path: Path) -> None:
     with pytest.warns(UserWarning):

@@ -103,16 +103,27 @@ class capture:
 
     @staticmethod
     def window(
-        process_name: str,
+        process: str | None = None,
+        *,
+        pid: int | None = None,
+        hwnd: int | None = None,
         index: int | None = None,
         mode: Literal["auto", "hdr", "sdr"] = "auto",
+        headless: bool = True,
     ) -> "capture":
         """Create a capture pipeline for a window.
 
         Args:
-            process_name: Target process (e.g. ``"notepad.exe"``).
-            index: Window index when the process has multiple windows.
+            process: Target process name (e.g. ``"notepad.exe"``).
+            pid: Target process id.
+            hwnd: Target window handle.
+            index: Ranked window index within candidate windows.
             mode: Capture mode (see ``monitor()``).
+            headless: Crop title bar and borders in window mode.
+
+        Notes:
+            Selector priority is ``hwnd > pid > process``.
+            At least one of ``hwnd``, ``pid``, or ``process`` must be provided.
         """
         ...
 
@@ -146,9 +157,7 @@ class capture:
         ...
 
     def __enter__(self) -> "capture": ...
-    def __exit__(
-        self, exc_type: object, exc_val: object, exc_tb: object
-    ) -> bool: ...
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool: ...
     def __repr__(self) -> str: ...
 
 def screenshot(
@@ -156,6 +165,7 @@ def screenshot(
     window: str | None = None,
     window_index: int | None = None,
     mode: Literal["auto", "hdr", "sdr"] = "auto",
+    headless: bool = True,
 ) -> CapturedFrame:
     """One-shot capture of a monitor or window.
 
@@ -167,6 +177,7 @@ def screenshot(
         window: Process name for window capture.
         window_index: Window index when the process has multiple windows.
         mode: Capture mode — ``'auto'``, ``'hdr'``, or ``'sdr'``.
+        headless: Crop title bar and borders for window capture.
 
     Returns:
         A ``CapturedFrame`` that can be saved or converted to numpy.
