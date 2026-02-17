@@ -14,9 +14,8 @@ Existing Python screenshot libraries produce washed-out images when Windows HDR 
 
 ## Requirements
 
-- Windows 10 version 1903 or later
-- Python >= 3.9
-- NumPy
+- Windows 10 version 1903+
+- Python >= 3.11
 
 ## Installation
 
