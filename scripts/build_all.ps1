@@ -1,11 +1,11 @@
-# build_all.ps1 — Release build + maturin wheel for each Python version + Rust tests.
+# build_all.ps1 — Release build + wheel build for each discovered venv + Rust tests.
 #
 # Usage:
 #   .\scripts\build_all.ps1            # full pipeline
 #   .\scripts\build_all.ps1 -SkipRust  # skip cargo build/test, only maturin wheels
 #
-# Requires: cargo, rustfmt, maturin
-# Python venvs: .venv (3.12), .venv313 (3.13) — must already exist in project root.
+# Requires: cargo, rustfmt, uv
+# Python venvs: auto-discovered from .venv* directories in project root.
 # Output: target/wheels/*.whl
 
 param(
@@ -18,10 +18,18 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Failed = @()
 
-# Hardcoded venvs: name → python executable
-$Venvs = [ordered]@{
-    "py312" = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-    "py313" = Join-Path $ProjectRoot ".venv313\Scripts\python.exe"
+function Get-VenvPythonExes($root) {
+    $venvDirs = Get-ChildItem -Path $root -Directory -Filter ".venv*" | Sort-Object Name
+    $pyExes = @()
+
+    foreach ($dir in $venvDirs) {
+        $pyExe = Join-Path $dir.FullName "Scripts\python.exe"
+        if (Test-Path $pyExe) {
+            $pyExes += $pyExe
+        }
+    }
+
+    return $pyExes
 }
 
 function Write-Step($msg) {
@@ -34,6 +42,18 @@ function Write-Ok($msg) {
 
 function Write-Fail($msg) {
     Write-Host "  [FAIL] $msg" -ForegroundColor Red
+}
+
+$Uv = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $Uv) {
+    Write-Fail "uv not found in PATH"
+    exit 1
+}
+
+$VenvPythonExes = Get-VenvPythonExes $ProjectRoot
+if ($VenvPythonExes.Count -eq 0) {
+    Write-Fail "No usable venv found. Expected .venv*\\Scripts\\python.exe in project root."
+    exit 1
 }
 
 # ------------------------------------------------------------------
@@ -67,27 +87,31 @@ if (-not $SkipRust) {
 }
 
 # ------------------------------------------------------------------
-# 2. maturin build: one wheel per Python version
+# 2. maturin build: one wheel per discovered venv
 # ------------------------------------------------------------------
-foreach ($entry in $Venvs.GetEnumerator()) {
-    $tag = $entry.Key
-    $pyExe = $entry.Value
+foreach ($pyExe in $VenvPythonExes) {
     $venvDir = Split-Path -Parent (Split-Path -Parent $pyExe)
+    $tag = Split-Path -Leaf $venvDir
+    $venvScripts = Join-Path $venvDir "Scripts"
 
     Write-Step "maturin build ($tag)"
-
-    if (-not (Test-Path $pyExe)) {
-        Write-Fail "python not found: $pyExe"
-        $Failed += "$tag missing"
-        continue
-    }
 
     $pyVer = & $pyExe --version 2>&1
     Write-Host "  $pyVer"
 
-    $env:VIRTUAL_ENV = $venvDir
-    & maturin build --release -i $pyExe
-    $env:VIRTUAL_ENV = $null
+    $oldVirtualEnv = $env:VIRTUAL_ENV
+    $oldPath = $env:PATH
+    try {
+        # Activate target venv context for uv --active.
+        $env:VIRTUAL_ENV = $venvDir
+        $env:PATH = "$venvScripts;$oldPath"
+        & uv run --active maturin build --release -i $pyExe
+    }
+    finally {
+        $env:VIRTUAL_ENV = $oldVirtualEnv
+        $env:PATH = $oldPath
+    }
+
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "maturin build ($tag)"
         $Failed += "$tag maturin"
