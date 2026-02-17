@@ -134,7 +134,7 @@ impl Capture {
         let name = process_name.to_string();
 
         let (cmd_tx, resp_rx, handle) = spawn_worker(Box::new(move || {
-            pipeline::CapturePipeline::window(&name, index, policy, headless)
+            pipeline::CapturePipeline::window(Some(&name), None, None, index, policy, headless)
         }))
         .map_err(PyRuntimeError::new_err)?;
 

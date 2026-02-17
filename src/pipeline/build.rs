@@ -1,5 +1,6 @@
 use super::*;
 use crate::capture::WindowSelector;
+use windows::Win32::Foundation::HWND;
 
 impl CapturePipeline {
     pub(super) fn frame_bytes(width: u32, height: u32, format: ColorPixelFormat) -> usize {
@@ -33,18 +34,33 @@ impl CapturePipeline {
         )
     }
 
-    /// Create window capture pipeline by process name
+    /// Create window capture pipeline by selector inputs.
     ///
-    /// `index` is the window index for processes with the same name, defaults to 0 (first matching window).
+    /// Priority: `hwnd` > `pid` > `process`.
+    ///
+    /// `index` is the ranked window index within the selected candidate set.
+    /// When `index` is `None`, the highest-ranked window is selected.
     /// `headless` controls whether to crop the title bar and borders (default: true).
     pub fn window(
-        process: &str,
+        process: Option<&str>,
+        pid: Option<u32>,
+        hwnd: Option<isize>,
         index: Option<usize>,
         policy: CapturePolicy,
         headless: bool,
     ) -> Result<Self> {
         enable_dpi_awareness();
-        let hwnd = find_window(WindowSelector::Process(process.to_string()), index)?;
+        let selector = if let Some(raw_hwnd) = hwnd {
+            WindowSelector::Hwnd(HWND(raw_hwnd as *mut core::ffi::c_void))
+        } else if let Some(pid) = pid {
+            WindowSelector::Pid(pid)
+        } else if let Some(process) = process {
+            WindowSelector::Process(process.to_string())
+        } else {
+            bail!("window target requires one of: hwnd, pid, process");
+        };
+
+        let hwnd = find_window(selector, index)?;
         let hmonitor = unsafe {
             windows::Win32::Graphics::Gdi::MonitorFromWindow(
                 hwnd,

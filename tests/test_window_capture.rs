@@ -36,7 +36,9 @@ fn test_capture_target_window() {
     }
 
     let mut pipeline = CapturePipeline::window(
-        TARGET_PROCESS,
+        Some(TARGET_PROCESS),
+        None,
+        None,
         Some(TARGET_INDEX),
         CapturePolicy::Auto,
         true,
