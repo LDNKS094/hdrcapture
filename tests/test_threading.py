@@ -1,210 +1,167 @@
-"""hdrcapture cross-thread safety verification
+"""Cross-thread safety tests for the Python binding."""
 
-Validates that the worker-thread architecture allows Capture objects to be
-freely shared across Python threads without panic or crash.
-"""
-
-import os
-import sys
-import time
-import threading
 import concurrent.futures
+import gc
+import threading
+from typing import Any
+
 import hdrcapture
+import pytest
 
 
-def timed(label, fn):
-    t0 = time.perf_counter()
-    result = fn()
-    dt = (time.perf_counter() - t0) * 1000
-    print(f"  {label}: {dt:.2f}ms")
-    return result
+pytestmark = [pytest.mark.threading, pytest.mark.requires_display]
 
 
-def main():
-    os.makedirs("tests/results", exist_ok=True)
-    errors = []
-    print("=== Cross-Thread Safety Tests ===\n")
+def _join_or_fail(thread: threading.Thread, timeout: float) -> None:
+    thread.join(timeout=timeout)
+    assert not thread.is_alive(), "worker thread timed out"
 
-    # 1. Create on main thread, use on worker thread
-    print("[1] Create on main, capture on worker thread")
+
+def test_create_on_main_capture_on_worker() -> None:
     cap = hdrcapture.capture.monitor(0)
-    result = [None]
-    exc = [None]
+    result: list[Any | None] = [None]
+    exc: list[Exception | None] = [None]
 
-    def worker_capture():
+    def worker_capture() -> None:
         try:
             result[0] = cap.capture()
-        except Exception as e:
-            exc[0] = e
+        except Exception as err:  # pragma: no cover - diagnostic path
+            exc[0] = err
 
-    t = threading.Thread(target=worker_capture)
+    try:
+        t = threading.Thread(target=worker_capture)
+        t.start()
+        _join_or_fail(t, timeout=10)
+
+        assert exc[0] is None
+        assert result[0] is not None
+    finally:
+        cap.close()
+
+
+def test_create_on_worker_capture_on_main() -> None:
+    cap_ref: list[Any | None] = [None]
+    exc: list[Exception | None] = [None]
+
+    def worker_create() -> None:
+        try:
+            cap_ref[0] = hdrcapture.capture.monitor(0)
+        except Exception as err:  # pragma: no cover - diagnostic path
+            exc[0] = err
+
+    t = threading.Thread(target=worker_create)
     t.start()
-    t.join(timeout=10)
-    if exc[0]:
-        print(f"  FAIL: {exc[0]}")
-        errors.append(("1", exc[0]))
-    elif result[0] is None:
-        print("  FAIL: no frame returned")
-        errors.append(("1", "no frame"))
-    else:
-        print(f"  OK: {repr(result[0])}")
-    cap.close()
+    _join_or_fail(t, timeout=10)
 
-    # 2. Create on worker thread, use on main thread
-    print("\n[2] Create on worker, capture on main thread")
-    cap2 = [None]
-    exc2 = [None]
+    assert exc[0] is None
+    assert cap_ref[0] is not None
 
-    def worker_create():
-        try:
-            cap2[0] = hdrcapture.capture.monitor(0)
-        except Exception as e:
-            exc2[0] = e
+    cap = cap_ref[0]
+    try:
+        frame = cap.capture()
+        assert frame is not None
+    finally:
+        cap.close()
 
-    t2 = threading.Thread(target=worker_create)
-    t2.start()
-    t2.join(timeout=10)
-    if exc2[0]:
-        print(f"  FAIL create: {exc2[0]}")
-        errors.append(("2", exc2[0]))
-    else:
-        try:
-            frame = cap2[0].capture()
-            print(f"  OK: {repr(frame)}")
-        except Exception as e:
-            print(f"  FAIL capture: {e}")
-            errors.append(("2", e))
-        finally:
-            cap2[0].close()
 
-    # 3. Concurrent grab from multiple threads (shared Capture)
-    print("\n[3] Concurrent grab from 4 threads (10 frames each)")
-    cap3 = hdrcapture.capture.monitor(0)
-    _ = cap3.grab()  # warm up
+def test_concurrent_grab_shared_capture() -> None:
+    cap = hdrcapture.capture.monitor(0)
+    _ = cap.grab()  # warm up
 
-    thread_results = {}
-    thread_errors = {}
+    thread_results: dict[int, list[float]] = {}
+    thread_errors: dict[int, Exception] = {}
     lock = threading.Lock()
 
-    def worker_grab(tid):
-        local_frames = []
+    def worker_grab(tid: int) -> None:
+        local_frames: list[float] = []
         local_err = None
         for _ in range(10):
             try:
-                f = cap3.grab()
-                local_frames.append(f.timestamp)
-            except Exception as e:
-                local_err = e
+                frame = cap.grab()
+                local_frames.append(frame.timestamp)
+            except Exception as err:  # pragma: no cover - diagnostic path
+                local_err = err
                 break
         with lock:
             thread_results[tid] = local_frames
-            if local_err:
+            if local_err is not None:
                 thread_errors[tid] = local_err
 
-    threads = [threading.Thread(target=worker_grab, args=(i,)) for i in range(4)]
-    t0 = time.perf_counter()
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
-    dt = (time.perf_counter() - t0) * 1000
+    try:
+        threads = [threading.Thread(target=worker_grab, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            _join_or_fail(t, timeout=30)
 
-    total_frames = sum(len(v) for v in thread_results.values())
-    print(f"  {total_frames} frames in {dt:.0f}ms across 4 threads")
-    if thread_errors:
-        for tid, e in thread_errors.items():
-            print(f"  FAIL thread {tid}: {e}")
-            errors.append(("3", e))
-    else:
-        print("  OK: no errors")
-    cap3.close()
+        assert not thread_errors
+        total_frames = sum(len(v) for v in thread_results.values())
+        assert total_frames == 40
+    finally:
+        cap.close()
 
-    # 4. Close from different thread than creator
-    print("\n[4] Close from different thread")
-    cap4 = hdrcapture.capture.monitor(0)
-    _ = cap4.capture()
-    exc4 = [None]
 
-    def worker_close():
+def test_close_from_different_thread() -> None:
+    cap = hdrcapture.capture.monitor(0)
+    _ = cap.capture()
+    exc: list[Exception | None] = [None]
+
+    def worker_close() -> None:
         try:
-            cap4.close()
-        except Exception as e:
-            exc4[0] = e
+            cap.close()
+        except Exception as err:  # pragma: no cover - diagnostic path
+            exc[0] = err
 
-    t4 = threading.Thread(target=worker_close)
-    t4.start()
-    t4.join(timeout=10)
-    if exc4[0]:
-        print(f"  FAIL: {exc4[0]}")
-        errors.append(("4", exc4[0]))
-    else:
-        # Verify it's actually closed
-        try:
-            cap4.capture()
-            print("  FAIL: should have raised after close")
-            errors.append(("4", "no error after close"))
-        except RuntimeError:
-            print("  OK: closed from worker thread, main thread gets RuntimeError")
+    t = threading.Thread(target=worker_close)
+    t.start()
+    _join_or_fail(t, timeout=10)
 
-    # 5. Drop via atexit / GC from different thread (simulated)
-    print("\n[5] Drop without explicit close (GC simulation)")
-    cap5 = hdrcapture.capture.monitor(0)
-    _ = cap5.capture()
-    # Just drop the reference — should not panic
-    del cap5
-    import gc
+    assert exc[0] is None
+    with pytest.raises(RuntimeError):
+        cap.capture()
 
+
+def test_drop_without_explicit_close() -> None:
+    cap = hdrcapture.capture.monitor(0)
+    _ = cap.capture()
+    del cap
+
+    # Should not panic or crash.
     gc.collect()
-    print("  OK: no panic on implicit drop")
 
-    # 6. ThreadPoolExecutor — real-world pattern
-    print("\n[6] ThreadPoolExecutor pattern")
-    cap6 = hdrcapture.capture.monitor(0)
-    _ = cap6.grab()  # warm up
 
-    def pool_grab(_):
-        return cap6.grab().timestamp
+@pytest.mark.slow
+def test_thread_pool_executor_pattern() -> None:
+    cap = hdrcapture.capture.monitor(0)
+    _ = cap.grab()  # warm up
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        t0 = time.perf_counter()
-        futures = [pool.submit(pool_grab, i) for i in range(20)]
-        timestamps = [f.result(timeout=10) for f in futures]
-        dt = (time.perf_counter() - t0) * 1000
+    def pool_grab(_: int) -> float:
+        return cap.grab().timestamp
 
-    print(f"  20 frames via ThreadPoolExecutor: {dt:.0f}ms")
-    print(f"  timestamps range: {min(timestamps):.3f}s — {max(timestamps):.3f}s")
-    cap6.close()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(pool_grab, i) for i in range(20)]
+            timestamps = [f.result(timeout=10) for f in futures]
 
-    # 7. screenshot() from worker thread
-    print("\n[7] screenshot() from worker thread")
-    exc7 = [None]
-    frame7 = [None]
+        assert len(timestamps) == 20
+        assert min(timestamps) <= max(timestamps)
+    finally:
+        cap.close()
 
-    def worker_screenshot():
+
+def test_screenshot_from_worker_thread() -> None:
+    exc: list[Exception | None] = [None]
+    frame_ref: list[Any | None] = [None]
+
+    def worker_screenshot() -> None:
         try:
-            frame7[0] = hdrcapture.screenshot()
-        except Exception as e:
-            exc7[0] = e
+            frame_ref[0] = hdrcapture.screenshot()
+        except Exception as err:  # pragma: no cover - diagnostic path
+            exc[0] = err
 
-    t7 = threading.Thread(target=worker_screenshot)
-    t7.start()
-    t7.join(timeout=15)
-    if exc7[0]:
-        print(f"  FAIL: {exc7[0]}")
-        errors.append(("7", exc7[0]))
-    elif frame7[0] is None:
-        print("  FAIL: no frame")
-        errors.append(("7", "no frame"))
-    else:
-        print(f"  OK: {repr(frame7[0])}")
+    t = threading.Thread(target=worker_screenshot)
+    t.start()
+    _join_or_fail(t, timeout=15)
 
-    # Summary
-    print(f"\n=== {'FAIL' if errors else 'ALL PASSED'} ===")
-    if errors:
-        for test_id, e in errors:
-            print(f"  test {test_id}: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+    assert exc[0] is None
+    assert frame_ref[0] is not None
