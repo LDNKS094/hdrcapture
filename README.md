@@ -116,7 +116,7 @@ frame = hdrcapture.screenshot(mode="sdr")
 
 ## API Reference
 
-### `screenshot(monitor=0, window=None, window_index=None, mode="auto") -> CapturedFrame`
+### `screenshot(monitor=0, window=None, index=None, mode="auto") -> CapturedFrame`
 
 One-shot capture. Creates and destroys a pipeline internally (~70ms cold start). Use `capture` class for repeated captures.
 

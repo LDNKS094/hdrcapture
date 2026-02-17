@@ -11,35 +11,40 @@ use super::frame::CapturedFrame;
 /// Args:
 ///     monitor: Monitor index, defaults to 0
 ///     window: Process name for window capture (e.g., "notepad.exe")
-///     window_index: Window index for processes with the same name, defaults to 0
+///     pid: Process id for window capture
+///     hwnd: Window handle for window capture
+///     index: Ranked window index within candidate windows
 ///     mode: Capture mode — "auto", "hdr", or "sdr"
 ///     headless: Crop title bar and borders for window capture, defaults to true
 ///
 /// Returns:
 ///     CapturedFrame: Frame container, can save() or convert to numpy
 #[pyfunction]
-#[pyo3(signature = (monitor=0, window=None, window_index=None, mode="auto", headless=true))]
+#[pyo3(signature = (monitor=0, window=None, pid=None, hwnd=None, index=None, mode="auto", headless=true))]
 pub(crate) fn screenshot(
     py: Python<'_>,
     monitor: usize,
     window: Option<&str>,
-    window_index: Option<usize>,
+    pid: Option<u32>,
+    hwnd: Option<isize>,
+    index: Option<usize>,
     mode: &str,
     headless: bool,
 ) -> PyResult<CapturedFrame> {
     // Reuse the exact same capture workflow as `capture` class methods:
     // create -> capture one frame -> close.
-    let mut cap = match window {
-        Some(process_name) => Capture::window(
+    let mut cap = if window.is_some() || pid.is_some() || hwnd.is_some() {
+        Capture::window(
             py,
-            Some(process_name.to_string()),
-            None,
-            None,
-            window_index,
+            window.map(str::to_string),
+            pid,
+            hwnd,
+            index,
             mode,
             headless,
-        )?,
-        None => Capture::monitor(py, monitor, mode)?,
+        )?
+    } else {
+        Capture::monitor(py, monitor, mode)?
     };
 
     let result = cap.capture(py);

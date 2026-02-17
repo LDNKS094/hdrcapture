@@ -163,7 +163,9 @@ class capture:
 def screenshot(
     monitor: int = 0,
     window: str | None = None,
-    window_index: int | None = None,
+    pid: int | None = None,
+    hwnd: int | None = None,
+    index: int | None = None,
     mode: Literal["auto", "hdr", "sdr"] = "auto",
     headless: bool = True,
 ) -> CapturedFrame:
@@ -175,7 +177,9 @@ def screenshot(
     Args:
         monitor: Monitor index (ignored when *window* is set).
         window: Process name for window capture.
-        window_index: Window index when the process has multiple windows.
+        pid: Process id for window capture.
+        hwnd: Window handle for window capture.
+        index: Ranked window index within candidate windows.
         mode: Capture mode — ``'auto'``, ``'hdr'``, or ``'sdr'``.
         headless: Crop title bar and borders for window capture.
 
