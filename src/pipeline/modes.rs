@@ -1,6 +1,23 @@
 use super::*;
 
+const STABLE_FRAME_TIMEOUT_ERR: &str = "Timeout waiting for stable frame after resize";
+
 impl CapturePipeline {
+    fn wait_stable_and_process(&mut self, mark_grab_sync: bool) -> Result<CapturedFrame> {
+        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
+        let raw = self
+            .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, mark_grab_sync)?
+            .ok_or_else(|| anyhow::anyhow!(STABLE_FRAME_TIMEOUT_ERR))?;
+        self.process_and_cache(raw)
+    }
+
+    fn cached_or_wait_stable(&mut self, mark_grab_sync: bool) -> Result<CapturedFrame> {
+        if self.cached_frame.is_some() {
+            return self.build_cached_frame();
+        }
+        self.wait_stable_and_process(mark_grab_sync)
+    }
+
     /// Shared first-call logic for both capture() and grab().
     fn handle_first_call(&mut self, mark_grab_sync: bool) -> Result<CapturedFrame> {
         self.first_call = false;
@@ -8,11 +25,7 @@ impl CapturePipeline {
         if let Some(result) = self.resolve_or_cache(frame, FRESH_FRAME_TIMEOUT, mark_grab_sync)? {
             return Ok(result);
         }
-        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
-        let raw = self
-            .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, mark_grab_sync)?
-            .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
-        self.process_and_cache(raw)
+        self.wait_stable_and_process(mark_grab_sync)
     }
 
     /// Screenshot mode: capture a fresh frame
@@ -47,17 +60,7 @@ impl CapturePipeline {
             }
         }
 
-        // Use cached data
-        if self.cached_frame.is_some() {
-            return self.build_cached_frame();
-        }
-
-        // No cache - full timeout
-        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
-        let raw = self
-            .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, false)?
-            .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
-        self.process_and_cache(raw)
+        self.cached_or_wait_stable(false)
     }
 
     /// Continuous capture mode: grab latest available frame
@@ -108,17 +111,7 @@ impl CapturePipeline {
             }
         }
 
-        // Timeout - use cached data
-        if self.cached_frame.is_some() {
-            return self.build_cached_frame();
-        }
-
-        // No cache - full timeout
-        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
-        let raw = self
-            .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, true)?
-            .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
-        self.process_and_cache(raw)
+        self.cached_or_wait_stable(true)
     }
 
     /// Whether the target monitor has HDR enabled.
