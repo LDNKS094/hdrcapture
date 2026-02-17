@@ -29,6 +29,8 @@ use crate::memory::ElasticBufferPool;
 
 mod types;
 mod build;
+mod frame_sync;
+mod crop;
 
 pub use types::{CapturedFrame, SharedFrameData};
 use types::{CropCache, RawFrame};
@@ -86,238 +88,6 @@ pub struct CapturePipeline {
 }
 
 impl CapturePipeline {
-    /// Check if frame pool needs recreation due to size change.
-    ///
-    /// For window targets, uses pre-queried geometry when available to avoid
-    /// redundant Win32 API calls. For monitor targets, uses frame ContentSize.
-    fn needs_recreate(
-        &self,
-        frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
-        geometry: Option<&WindowGeometry>,
-    ) -> Result<Option<(u32, u32)>> {
-        if self.capture.is_window_target() {
-            if let Some(geo) = geometry {
-                let (pool_w, pool_h) = self.capture.pool_size();
-                if geo.frame_width != pool_w || geo.frame_height != pool_h {
-                    return Ok(Some((geo.frame_width, geo.frame_height)));
-                }
-            }
-            return Ok(None);
-        }
-
-        let content_size = frame.ContentSize()?;
-        let new_w = content_size.Width as u32;
-        let new_h = content_size.Height as u32;
-
-        if new_w == 0 || new_h == 0 {
-            return Ok(None);
-        }
-
-        let (pool_w, pool_h) = self.capture.pool_size();
-        if new_w != pool_w || new_h != pool_h {
-            return Ok(Some((new_w, new_h)));
-        }
-
-        Ok(None)
-    }
-
-    fn resolve_frame_after_resize(
-        &mut self,
-        frame: windows::Graphics::Capture::Direct3D11CaptureFrame,
-        timeout: Duration,
-        mark_grab_sync: bool,
-    ) -> Result<Option<RawFrame>> {
-        let mut current = frame;
-        let mut drop_next = false;
-
-        for _ in 0..RESIZE_RETRY_LIMIT {
-            // Query window geometry once per iteration (used for both resize check and crop).
-            let (pool_w, pool_h) = self.capture.pool_size();
-            let geometry = self.capture.window_geometry(pool_w, pool_h);
-
-            if let Some((new_w, new_h)) = self.needs_recreate(&current, geometry.as_ref())? {
-                if mark_grab_sync {
-                    self.force_fresh = true;
-                }
-                self.capture.recreate_frame_pool(new_w, new_h)?;
-                // Drop the first frame after recreate to avoid stale content.
-                drop_next = true;
-
-                if let Some(next) = self.try_wait_frame(timeout)? {
-                    current = next;
-                    continue;
-                }
-
-                return Ok(None);
-            }
-
-            // Post-recreate: skip this frame (likely stale), fetch next.
-            if drop_next {
-                drop_next = false;
-                if let Some(next) = self.try_wait_frame(timeout)? {
-                    current = next;
-                    continue;
-                }
-                return Ok(None);
-            }
-
-            let client_box = if self.headless {
-                geometry.and_then(|g| g.client_box)
-            } else {
-                None
-            };
-            return self.read_raw_frame(&current, client_box).map(Some);
-        }
-
-        Ok(None)
-    }
-
-    /// Wait for the next frame from the pool, with timeout.
-    /// Returns None on timeout instead of error.
-    fn try_wait_frame(
-        &self,
-        timeout: Duration,
-    ) -> Result<Option<windows::Graphics::Capture::Direct3D11CaptureFrame>> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Ok(f) = self.capture.try_get_next_frame() {
-                return Ok(Some(f));
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(None);
-            }
-            let timeout_ms = remaining.as_millis().min(u32::MAX as u128) as u32;
-            if self.capture.wait_for_frame(timeout_ms).is_err() {
-                return Ok(None);
-            }
-        }
-    }
-
-    /// Wait for the next frame, returning error on timeout.
-    fn wait_frame(
-        &self,
-        timeout: Duration,
-    ) -> Result<windows::Graphics::Capture::Direct3D11CaptureFrame> {
-        self.try_wait_frame(timeout)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Timeout waiting for capture frame ({}ms)",
-                timeout.as_millis()
-            )
-        })
-    }
-
-    /// Ensure a crop texture exists with the given dimensions and format.
-    /// Reuses the cached texture if dimensions and format match.
-    fn ensure_crop_texture(
-        &mut self,
-        width: u32,
-        height: u32,
-        format: DXGI_FORMAT,
-    ) -> Result<ID3D11Texture2D> {
-        if let Some(ref cache) = self.crop_texture {
-            if cache.width == width && cache.height == height && cache.format == format {
-                return Ok(cache.texture.clone());
-            }
-        }
-
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: format,
-            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-
-        // SAFETY: desc is fully initialized; CreateTexture2D allocates a GPU resource.
-        let texture = unsafe {
-            let mut tex = None;
-            self._d3d_ctx
-                .device
-                .CreateTexture2D(&desc, None, Some(&mut tex))
-                .context("Failed to create crop texture")?;
-            tex.unwrap()
-        };
-
-        self.crop_texture = Some(CropCache {
-            texture: texture.clone(),
-            width,
-            height,
-            format,
-        });
-
-        Ok(texture)
-    }
-
-    /// Extract texture and metadata from WGC frame.
-    ///
-    /// For window capture, crops to client area (removes title bar and borders)
-    /// using `CopySubresourceRegion` on the GPU.
-    /// `client_box` is pre-computed from `window_geometry()` to avoid redundant Win32 queries.
-    fn read_raw_frame(
-        &mut self,
-        frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
-        client_box: Option<D3D11_BOX>,
-    ) -> Result<RawFrame> {
-        let timestamp = frame.SystemRelativeTime()?.Duration as f64 / 10_000_000.0;
-
-        let source_texture = WGCCapture::frame_to_texture(frame)?;
-
-        let (src_width, src_height, format) = unsafe {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            source_texture.GetDesc(&mut desc);
-            (desc.Width, desc.Height, desc.Format)
-        };
-        let color_format = Self::color_format(format)?;
-
-        // For window capture: crop to client area (remove title bar / borders)
-        if let Some(client_box) = client_box {
-            let crop_w = client_box.right - client_box.left;
-            let crop_h = client_box.bottom - client_box.top;
-
-            let cropped = self.ensure_crop_texture(crop_w, crop_h, format)?;
-
-            // SAFETY: Both textures are valid D3D11 resources with compatible formats.
-            // CopySubresourceRegion copies the client_box region from source to (0,0) of dest.
-            unsafe {
-                self._d3d_ctx.context.CopySubresourceRegion(
-                    &cropped,
-                    0,
-                    0,
-                    0,
-                    0,
-                    &source_texture,
-                    0,
-                    Some(&client_box),
-                );
-            }
-
-            return Ok(RawFrame {
-                texture: cropped,
-                width: crop_w,
-                height: crop_h,
-                timestamp,
-                format: color_format,
-            });
-        }
-
-        Ok(RawFrame {
-            texture: source_texture,
-            width: src_width,
-            height: src_height,
-            timestamp,
-            format: color_format,
-        })
-    }
-
     /// Run color pipeline once and cache the final output for fallback.
     fn process_and_cache(&mut self, raw: RawFrame) -> Result<CapturedFrame> {
         let processed = color::process_frame(
@@ -399,11 +169,11 @@ impl CapturePipeline {
     /// Shared first-call logic for both capture() and grab().
     fn handle_first_call(&mut self, mark_grab_sync: bool) -> Result<CapturedFrame> {
         self.first_call = false;
-        let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
+        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
         if let Some(result) = self.resolve_or_cache(frame, FRESH_FRAME_TIMEOUT, mark_grab_sync)? {
             return Ok(result);
         }
-        let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
+        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
         let raw = self
             .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, mark_grab_sync)?
             .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
@@ -429,7 +199,7 @@ impl CapturePipeline {
         }
 
         // Try to get a fresh frame with short timeout
-        if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
+        if let Some(fresh) = self.soft_wait_frame(FRESH_FRAME_TIMEOUT)? {
             if let Some(result) = self.resolve_or_cache(fresh, FRESH_FRAME_TIMEOUT, false)? {
                 return Ok(result);
             }
@@ -448,7 +218,7 @@ impl CapturePipeline {
         }
 
         // No cache — full timeout
-        let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
+        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
         let raw = self
             .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, false)?
             .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
@@ -468,7 +238,7 @@ impl CapturePipeline {
         if self.force_fresh {
             self.force_fresh = false;
 
-            if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
+            if let Some(fresh) = self.soft_wait_frame(FRESH_FRAME_TIMEOUT)? {
                 if let Some(result) = self.resolve_or_cache(fresh, FRESH_FRAME_TIMEOUT, true)? {
                     return Ok(result);
                 }
@@ -497,7 +267,7 @@ impl CapturePipeline {
         }
 
         // Pool empty — try short wait for new frame
-        if let Some(fresh) = self.try_wait_frame(FRESH_FRAME_TIMEOUT)? {
+        if let Some(fresh) = self.soft_wait_frame(FRESH_FRAME_TIMEOUT)? {
             if let Some(result) = self.resolve_or_cache(fresh, FRESH_FRAME_TIMEOUT, true)? {
                 return Ok(result);
             }
@@ -509,7 +279,7 @@ impl CapturePipeline {
         }
 
         // No cache — full timeout
-        let frame = self.wait_frame(FIRST_FRAME_TIMEOUT)?;
+        let frame = self.hard_wait_frame(FIRST_FRAME_TIMEOUT)?;
         let raw = self
             .resolve_frame_after_resize(frame, FIRST_FRAME_TIMEOUT, true)?
             .ok_or_else(|| anyhow::anyhow!("Timeout waiting for stable frame after resize"))?;
