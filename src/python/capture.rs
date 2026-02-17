@@ -29,6 +29,12 @@ pub(crate) struct Capture {
 }
 
 impl Capture {
+    fn warn(py: Python<'_>, message: &str) -> PyResult<()> {
+        let warnings = py.import("warnings")?;
+        warnings.call_method1("warn", (message,))?;
+        Ok(())
+    }
+
     /// Send a command and unwrap the response, erroring if already closed.
     ///
     /// Releases the GIL before acquiring the Mutex to prevent deadlock:
@@ -114,27 +120,51 @@ impl Capture {
         Ok(cap)
     }
 
-    /// Create window capture pipeline by process name
+    /// Create window capture pipeline by window selector inputs.
     ///
     /// Args:
-    ///     process_name: Process name (e.g., "notepad.exe")
-    ///     index: Window index for processes with the same name, defaults to 0
+    ///     process: Process name (e.g., "notepad.exe")
+    ///     pid: Target process id
+    ///     hwnd: Target window handle
+    ///     index: Ranked window index within candidate windows
     ///     mode: Capture mode — "auto", "hdr", or "sdr"
     ///     headless: Crop title bar and borders, defaults to true
     #[staticmethod]
-    #[pyo3(signature = (process_name, index=None, mode="auto", headless=true))]
+    #[pyo3(signature = (process=None, *, pid=None, hwnd=None, index=None, mode="auto", headless=true))]
     pub(crate) fn window(
         py: Python<'_>,
-        process_name: &str,
+        process: Option<String>,
+        pid: Option<u32>,
+        hwnd: Option<isize>,
         index: Option<usize>,
         mode: &str,
         headless: bool,
     ) -> PyResult<Self> {
         let policy = parse_mode(mode)?;
-        let name = process_name.to_string();
+
+        if hwnd.is_none() && pid.is_none() && process.is_none() {
+            return Err(PyRuntimeError::new_err(
+                "window requires one of: hwnd, pid, process",
+            ));
+        }
+
+        if hwnd.is_some() && (pid.is_some() || process.is_some()) {
+            Self::warn(py, "'hwnd' provided; ignoring 'pid' and 'process'.")?;
+        } else if pid.is_some() && process.is_some() {
+            Self::warn(py, "'pid' provided; ignoring 'process'.")?;
+        }
+
+        let process_for_worker = process;
 
         let (cmd_tx, resp_rx, handle) = spawn_worker(Box::new(move || {
-            pipeline::CapturePipeline::window(Some(&name), None, None, index, policy, headless)
+            pipeline::CapturePipeline::window(
+                process_for_worker.as_deref(),
+                pid,
+                hwnd,
+                index,
+                policy,
+                headless,
+            )
         }))
         .map_err(PyRuntimeError::new_err)?;
 

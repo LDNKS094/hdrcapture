@@ -30,7 +30,15 @@ pub(crate) fn screenshot(
     // Reuse the exact same capture workflow as `capture` class methods:
     // create -> capture one frame -> close.
     let mut cap = match window {
-        Some(process_name) => Capture::window(py, process_name, window_index, mode, headless)?,
+        Some(process_name) => Capture::window(
+            py,
+            Some(process_name.to_string()),
+            None,
+            None,
+            window_index,
+            mode,
+            headless,
+        )?,
         None => Capture::monitor(py, monitor, mode)?,
     };
 
